@@ -165,23 +165,35 @@ doc.add_page_break()
 
 # ---------- Chapter 4 ----------
 h("Chapter 4: Data", 1)
-h("4.1 Data Sources", 2)
-p("Two modality-specific datasets are used and processed separately, mirroring the decoupled training design:")
+h("4.1 Data Sources (exclusively public repositories)", 2)
+p("All training data are drawn exclusively from public repositories \u2014 no primary/self-collected data \u2014 across two modality families, each trained separately:")
 for item in [
-    "Image data: public Kaggle freshness datasets (e.g., Fresh and Stale Images of Fruits and Vegetables; Food Freshness Dataset; Fruits fresh and rotten for classification). Class folders containing 'fresh', 'stale', or 'rotten' are mapped to binary labels.",
-    "Sensor data: an aggregated CSV of CH2O (ppm), BME680 VOC (log-ohm), core/ambient temperature (\u00b0C), humidity (%), the CH2O/VOC ratio, core temperature rise rate, and elapsed hours, labeled 0 = fresh, 1 = stale (natural decay), 2 = chemically masked.",
-    "When no physical sensor CSV is available yet, a physics-based synthetic generator replicating the proposal's 96-hour controlled-decay protocol (26-36 \u00b0C, 60-88% RH, formalin-dilution masking of visual decay) is used for pipeline development and validation.",
+    "Image branch (3-4 datasets): merged Kaggle fresh/stale corpora covering the proposal's three target groups \u2014 fruits (Fresh and Stale Images of Fruits and Vegetables), fish (Tilapia Fresh and Non Fresh, 6,900 images), and meat (Meat Freshness Image Dataset, Fresh/Half-Fresh/Spoiled); the 70k-image Food Freshness Dataset serves as an ablation set for volume experiments.",
+    "Sensor branch (3-4 datasets): public sensor-telemetry CSVs \u2014 the Fruit Freshness Electronic-Nose dataset (MQ2-MQ135 arrays, multi-day decay series, DOI: 10.5281/zenodo.17285312), sensor-based chicken-meat quality data (temperature/humidity channels), an IoT food-storage temperature-humidity log, and the Mendeley e-nose beef-quality dataset (8 MOS sensors + DHT11 logged on an ESP32) as a hardware-mirrored validation set.",
+    "Chemically-masked class: obtained through controlled simulated adulteration augmentation (a documented fraction of formalin-masking overlay rows), since no public dataset provides labeled formalin-treated samples.",
 ]:
     p(item)
-h("4.2 Data Preprocessing and Handling", 2)
+ph("[Record the exact attached Kaggle dataset names/sizes and per-dataset image/row counts here once runs are complete.]")
+h("4.2 Data Preprocessing and Handling (multi-dataset)", 2)
 for item in [
     "Images resized to a uniform 224x224 and normalized from [0,255] to [0,1]; an internal rescaling layer maps them to the ImageNet range.",
+    "Multi-dataset sensor mapping: each CSV dataset is mapped onto a canonical 8-channel schema (CH2O ppm, VOC log-ohm, core/ambient temperature, humidity, derived CH2O/VOC ratio, temperature rise rate, elapsed hours) via a per-dataset column-mapping configuration.",
+    "Missing-channel strategy: each dataset emits a per-channel availability flag; wholly missing channels are imputed from cross-dataset statistics and explicitly flagged, producing a dataset x channel coverage report (Table 4.1) that documents which public dataset supplies which channel and names the extra dataset required to close remaining gaps.",
     "Sensor streams: min-max scaling followed by a windowed moving average (Kalman-style pre-filtering) to suppress market-environment noise.",
     "15% stratified validation split for both branches; class-coherent pairing of image and sensor samples for the fusion stage.",
     "INT8 post-training quantization reduces the trained network footprint by roughly 75% while preserving over 95% of FP32 accuracy.",
 ]:
     p(item)
-ph("[Record the final dataset attachment names/sizes on Kaggle and the exact train/validation counts here once runs are complete.]")
+table(
+    ["Dataset", "CH2O", "VOC", "Core T", "Amb T", "RH", "Ratio", "Rise", "Hours", "Labels"],
+    [
+        ["E-nose fruits CSV", "YES", "YES", "-", "-", "-", "derived", "derived", "day idx", "fresh/stale"],
+        ["Chicken sensor CSV", "-", "-", "YES", "YES", "YES", "derived", "derived", "[check]", "quality stage"],
+        ["IoT storage CSV", "-", "-", "[check]", "YES", "YES", "derived", "derived", "[check]", "condition"],
+        ["Beef e-nose (Mendeley)", "MQ-class", "YES", "YES", "YES", "YES", "derived", "derived", "timestamps", "4-class"],
+    ],
+    "Table 4.1 - Multi-dataset sensor channel coverage (replace the [check] cells with the notebook's printed coverage report).",
+)
 h("4.3 Data Visualization", 2)
 for item in [
     "Adulteration boundary scatterplot: CH2O-vs-VOC separation between natural decay and chemically preserved samples (outputs/adulteration_boundary.png).",
