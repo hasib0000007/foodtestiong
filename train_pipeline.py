@@ -30,7 +30,7 @@
 # ## 0. Setup & Configuration
 
 # %%
-import os, glob, json, math, random
+import os, glob, json, math, random, gc
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -577,6 +577,7 @@ for c in SENSOR_COLS:                                   # proposal: min-max scal
 smoothed = scaled.copy()                                # proposal: moving-average smoothing
 smoothed[SENSOR_COLS] = np.clip(
     ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0), 0.0, 1.0)
+del scaled                                              # free ~130 MB before feature building
 
 FEATURE_COLS = SENSOR_COLS + AV_COLS                    # values + availability flags
 idx = np.random.permutation(len(smoothed))
@@ -642,6 +643,7 @@ print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Maske
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
 sensor_feature_extractor.save(f"{OUT}/sensor_feature_extractor.keras")
 print("Sensor branch saved (separate training done).")
+gc.collect()                                            # release training temporaries before Part C
 
 # %% [markdown]
 # ## Part C — Feature-Level Late Fusion + Mahalanobis Distance → Decision Fusion Engine
@@ -658,6 +660,10 @@ print("Sensor branch saved (separate training done).")
 # ### C1. Build a paired multimodal set and extract frozen branch features
 
 # %%
+# Hoist ONCE: calling smoothed[FEATURE_COLS].values inside the pairing loop allocates
+# a fresh ~1M-row x 16-col (~135 MB) pandas copy per iteration -> Kaggle RAM OOM crash.
+SMOOTHED_MATRIX = smoothed[FEATURE_COLS].values.astype(np.float32)
+
 def branch_features_for_pair(base_idx):
     """Pair image index and sensor row by freshness-state so the two modalities are coherent."""
     feats, y = [], []
@@ -667,7 +673,7 @@ def branch_features_for_pair(base_idx):
         pool = tr_sensor_of_state[state] if state in tr_sensor_of_state else tr_sensor_of_state[2]
         cand = int(rng.choice(pool, size=1)[0])
         img, _ = load_img(paths[i], labels[i])
-        feats.append((img, smoothed[FEATURE_COLS].values[cand]))
+        feats.append((img, SMOOTHED_MATRIX[cand]))
         y.append(state)
     return feats, np.array(y)
 
