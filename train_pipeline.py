@@ -90,11 +90,14 @@ PAIR_LIMIT = 400           # max paired samples for the fusion set
 
 MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows added to Part B
 
+IMG_AUGMENT = True            # random flip/rotation/zoom inside the image branch —
+                              # multiplies the effective training-set size for free
+
 # recommended extra Kaggle dataset per missing channel (printed by the coverage report)
 MISSING_CHANNEL_GUIDE = {
     "ch2o_ppm":      "attach [Dataset of Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (formalin-labeled gas-sensor food data — closest public proxy for the ZE08-CH2O) or any MQ135 gas-sensor CSV",
     "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135) or [BME688 Odours] https://www.kaggle.com/datasets/laurabasa/bme688-odours (real Bosch BME68x gas resistance — same family as our BME680)",
-    "core_temp_c":   "attach [Chicken Meat Freshness Dataset (sensor-based)] https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset or [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column)",
+    "core_temp_c":   "attach [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column) or any food-storage temperature CSV",
     "ambient_temp_c":"attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "humidity_pct":  "attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "ch2o_voc_ratio":"derived automatically from ch2o_ppm and voc_log_ohm — no extra dataset needed",
@@ -111,13 +114,14 @@ SENSOR_CSVS = [
      "mapping": {"voc_log_ohm": "MQ2", "ch2o_ppm": "MQ135",      # MQ135 responds to aldehyde-family gases
                  "core_temp_c": None, "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
-    # --- chicken meat sensor-graded dataset (temperature-related channels) ---
+    # --- chicken meat dataset: 10 virtual VOC channels + mean/variance + Target ---
+    # real columns: sensor-level VOC values, 'mean', 'variance', 'target'
+    # ('Fresh_Day4' / 'FrozenThawed_Day6') — no temperature/humidity columns here.
     {"name": "chicken_sensor",
      "path": "/kaggle/input/chicken-meat-freshness-dataset/*.csv",
-     "label_rule": {"type": "column", "col": "label"},
-     "mapping": {"core_temp_c": "temperature", "ambient_temp_c": "ambient_temperature",
-                 "humidity_pct": "humidity", "voc_log_ohm": None,
-                 "ch2o_ppm": None, "hours_elapsed": None}},
+     "label_rule": {"type": "text", "col": "target"},
+     "mapping": {"voc_log_ohm": "mean", "ch2o_ppm": None, "core_temp_c": None,
+                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": None}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
     # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
     # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
@@ -241,6 +245,10 @@ train_ds, val_ds = make_ds(tr_idx, True), make_ds(val_idx, False)
 def build_image_branch():
     inp = keras.Input(shape=(*IMG_SIZE, 3), name="image_input")
     x = layers.Rescaling(2.0, offset=-1.0, name="to_imagenet_range")(inp)  # [0,1] -> [-1,1] (ImageNet conv)
+    if IMG_AUGMENT:   # active only during .fit(); disabled at inference/INT8 export
+        x = layers.RandomFlip("horizontal", name="aug_flip")(x)
+        x = layers.RandomRotation(0.08, name="aug_rot")(x)
+        x = layers.RandomZoom(0.08, name="aug_zoom")(x)
     base = keras.applications.MobileNetV2(
         input_shape=(*IMG_SIZE, 3), alpha=ALPHA, include_top=False, weights="imagenet")
     base.trainable = False
@@ -302,6 +310,13 @@ def resolve_label(rule, df, fname):
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
         y = pd.to_numeric(df[col], errors="coerce")
         return y.fillna(1).astype(int).values
+    if t == "text":           # string labels like 'Fresh_Day4' vs 'FrozenThawed_Day6'
+        col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
+        assert col is not None, f"{fname}: label column '{rule['col']}' not found"
+        sl = df[col].astype(str).str.lower()
+        y = sl.str.contains(rule.get("fresh_match", "fresh"), regex=False) \
+            & ~sl.str.contains(rule.get("stale_match", "\x00"), regex=False)
+        return y.astype(int).values
     if t == "day_decay":      # filenames like 'Banana D3.csv' — later days are staler
         seq = fname.rsplit(".", 1)[0].lower().split()[-1].lstrip("d")
         day = int(seq) if seq.isdigit() else 1
