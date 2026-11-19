@@ -198,13 +198,44 @@ def discover_class_dirs(root, dataset_name):
             break
     return class_dirs
 
-def freshness_label(class_name):
-    n = class_name.lower()
-    if "stale" in n or "rotten" in n or "discard" in n or "spoil" in n or "not fresh" in n or "non-fresh" in n or "nonfresh" in n or "half" in n:
+def _string_label(text):
+    n = str(text).lower()
+    if any(k in n for k in ("stale", "rotten", "discard", "spoil", "not fresh", "non-fresh",
+                            "non fresh", "nonfresh", "half")):
         return 0
     if "fresh" in n:
         return 1
     return None
+
+def freshness_label(class_name):
+    """IMPORTANT: checks ONLY the class-folder basename, never the full path.
+    Full-path checks break on slugs like 'fresh-and-STALE-images...'."""
+    return _string_label(os.path.basename(str(class_name)))
+
+def labels_from_classes_csv(folder):
+    """Parse a Roboflow multiclass export (one folder, images + _classes.csv with
+    columns like 'filename,Fresh,Half-Fresh,Spoiled'). Returns [(filepath, 0/1)].
+    Half-Fresh and Spoiled both count as not-fresh (label 0)."""
+    pairs = []
+    for f in glob.glob(os.path.join(folder, "*.csv")):
+        try:
+            df = pd.read_csv(f)
+        except Exception:
+            continue
+        if df.empty or len(df.columns) < 2:
+            continue
+        fname_col, cls_cols = df.columns[0], list(df.columns[1:])
+        if not df[fname_col].astype(str).str.lower().str.endswith((".jpg", ".jpeg", ".png")).all():
+            continue
+        for _, r in df.iterrows():
+            fp = os.path.join(folder, str(r[fname_col]))
+            if not os.path.isfile(fp):
+                continue
+            best = max(cls_cols, key=lambda c: r[c])
+            lab = _string_label(best)
+            if lab is not None:
+                pairs.append((fp, lab))
+    return pairs
 
 def _make_demo_images(root, per_class=12):
     """Tiny synthetic image set used ONLY for local dry runs (never on Kaggle)."""
@@ -224,7 +255,14 @@ for root in IMAGE_DATASETS:
     dataset_name = os.path.basename(root.rstrip("/"))
     n0 = len(paths)
     for name, folder in discover_class_dirs(root, dataset_name).items():
-        lab = freshness_label(os.path.basename(name))
+        csv_pairs = labels_from_classes_csv(folder)   # Roboflow multiclass export (meat)
+        if csv_pairs:
+            for fp, lab in csv_pairs:
+                paths.append(fp); labels.append(lab)
+            continue
+        # rel-path labeling: tilapia's fresh/stale info lives in PARENT folders
+        # (Fresh_Day1/Eyes, NonFresh/Day3/Eyes), not in the leaf basename ('Eyes').
+        lab = _string_label(os.path.relpath(folder, root))
         if lab is None:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
@@ -236,7 +274,7 @@ if not paths and not RUNNING_ON_KAGGLE:
     _make_demo_images("_demo_images")
     IMAGE_DATASETS = ["_demo_images"]
     for name, folder in discover_class_dirs("_demo_images", "_demo_images").items():
-        lab = freshness_label(os.path.basename(name))
+        lab = _string_label(os.path.basename(name))
         if lab is None:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
