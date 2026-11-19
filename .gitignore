@@ -1,0 +1,6 @@
+_demo_images/
+_demo_sensor/
+outputs/
+__pycache__/
+*.keras
+*.tflite
