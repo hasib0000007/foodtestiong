@@ -146,13 +146,14 @@ SENSOR_CSVS = [
                  "core_temp_c": None, "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
     # --- chicken meat dataset: 10 virtual VOC channels + mean/variance + Target ---
-    # real columns: sensor-level VOC values, 'mean', 'variance', 'target'
-    # ('Fresh_Day4' / 'FrozenThawed_Day6') — no temperature/humidity columns here.
+    # verified columns: Category, Shelf_Life_Day, Sensor_1..10, Mean_Value, Variance, Target
+    # Shelf_Life_Day is a REAL hours_elapsed channel (day x 24 via 'scale').
     {"name": "chicken_sensor",
      "path": os.path.join(SENSOR_ROOTS["chicken_sensor"], "**", "*.csv") if SENSOR_ROOTS["chicken_sensor"] else "",
      "label_rule": {"type": "text", "col": "target"},
-     "mapping": {"voc_log_ohm": "mean", "ch2o_ppm": None, "core_temp_c": None,
-                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": None}},
+     "mapping": {"voc_log_ohm": "Mean_Value", "ch2o_ppm": None, "core_temp_c": None,
+                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": "Shelf_Life_Day"},
+     "scale": {"hours_elapsed": 24.0}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
     # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
     # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
@@ -413,6 +414,8 @@ def load_sensor_datasets(cfgs):
                 row[canon] = pd.to_numeric(df[raw.strip().lower()], errors="coerce") if raw \
                              and raw.strip().lower() in df.columns else np.full(len(df), np.nan)
             sub = pd.DataFrame(row)
+            for canon, mul in cfg.get("scale", {}).items():  # unit harmonization (e.g. days -> hours)
+                sub[canon] = sub[canon] * mul
             for canon in ("hours_elapsed", "ambient_temp_c"):      # still missing? neutral fill + flag
                 if sub[canon].isna().all():
                     sub[canon] = 0.0 if canon == "hours_elapsed" else 25.0
