@@ -74,12 +74,25 @@ print("GPU:", tf.config.list_physical_devices("GPU"))
 # obtain that class — state it as "simulated adulteration augmentation" in the thesis.
 
 # %%
-IMAGE_DATASETS = [
+def find_ds(*keywords):
+    """Return the top-level /kaggle/input/<slug> folder whose basename contains ALL keywords."""
+    if not RUNNING_ON_KAGGLE:
+        return None
+    for root in sorted(glob.glob("/kaggle/input/*")):
+        base = os.path.basename(root).lower()
+        if all(k in base for k in keywords):
+            return root
+    return None
+
+_IMAGE_FALLBACK = [
     "/kaggle/input/fresh-and-stale-images-of-fruits-and-vegetables",   # fruits (raghavrpotdar)
     "/kaggle/input/tilapia-fish-fresh-and-non-fresh-species",          # fish (haripriyasanga)
     "/kaggle/input/meat-freshness-image-dataset",                      # meat (vinayakshanawad)
     # "/kaggle/input/food-freshness-dataset",                          # optional 70k ablation set
 ]
+IMAGE_DATASETS = [p for p in (find_ds("fresh-and-stale"), find_ds("tilapia"),
+                              find_ds("meat-freshness-image")) if p] or _IMAGE_FALLBACK
+print("Auto-detected image datasets:", IMAGE_DATASETS)
 IMG_VAL_FRACTION = 0.15
 BATCH = 32
 EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
@@ -105,11 +118,18 @@ MISSING_CHANNEL_GUIDE = {
     "hours_elapsed": "usually derivable from timestamps or file/day indices; else attach any time-series food CSV",
 }
 
-# each sensor dataset: path/glob + column mapping (canonical -> raw column or None)
+# each sensor dataset: path/glob (auto-resolved from /kaggle/input roots) + column mapping.
+# The recursive '**' glob picks up EVERY CSV in the dataset, whatever the folder layout.
+SENSOR_ROOTS = {
+    "enose_fruits":   find_ds("electronic-nose") or find_ds("e-nose"),
+    "chicken_sensor": find_ds("chicken-meat"),
+    "tofu_formalin":  find_ds("aroma-tahu") or find_ds("formalin-tofu"),
+}
+print("Auto-resolved sensor roots:", SENSOR_ROOTS)
 SENSOR_CSVS = [
     # --- e-nose MQ dataset (real hardware telemetry; decay day-series per fruit) ---
     {"name": "enose_fruits",
-     "path": "/kaggle/input/food-freshness-electronic-nose-data/**/*.csv",
+     "path": os.path.join(SENSOR_ROOTS["enose_fruits"], "**", "*.csv") if SENSOR_ROOTS["enose_fruits"] else "",
      "label_rule": {"type": "day_decay", "fresh_days": [1, 2], "stale_days": [3, 4, 5]},
      "mapping": {"voc_log_ohm": "MQ2", "ch2o_ppm": "MQ135",      # MQ135 responds to aldehyde-family gases
                  "core_temp_c": None, "ambient_temp_c": None,
@@ -118,7 +138,7 @@ SENSOR_CSVS = [
     # real columns: sensor-level VOC values, 'mean', 'variance', 'target'
     # ('Fresh_Day4' / 'FrozenThawed_Day6') — no temperature/humidity columns here.
     {"name": "chicken_sensor",
-     "path": "/kaggle/input/chicken-meat-freshness-dataset/*.csv",
+     "path": os.path.join(SENSOR_ROOTS["chicken_sensor"], "**", "*.csv") if SENSOR_ROOTS["chicken_sensor"] else "",
      "label_rule": {"type": "text", "col": "target"},
      "mapping": {"voc_log_ohm": "mean", "ch2o_ppm": None, "core_temp_c": None,
                  "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": None}},
@@ -126,7 +146,7 @@ SENSOR_CSVS = [
     # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
     # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
     {"name": "tofu_formalin",
-     "path": "/kaggle/input/dataset-aroma-tahu-berfomalin/*.csv",
+     "path": os.path.join(SENSOR_ROOTS["tofu_formalin"], "**", "*.csv") if SENSOR_ROOTS["tofu_formalin"] else "",
      "label_rule": {"type": "column", "col": "label"},
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
@@ -156,7 +176,7 @@ SENSOR_CSVS = [
 # map to label 0 (`non-fresh` also counts as stale). Per-dataset counts are printed.
 
 # %%
-def discover_class_dirs(root):
+def discover_class_dirs(root, dataset_name):
     class_dirs = {}
     for d in sorted(glob.glob(os.path.join(root, "**/"), recursive=True)):
         d = d.rstrip(os.sep)
@@ -192,7 +212,7 @@ for root in IMAGE_DATASETS:
         continue
     dataset_name = os.path.basename(root.rstrip("/"))
     n0 = len(paths)
-    for name, folder in discover_class_dirs(root).items():
+    for name, folder in discover_class_dirs(root, dataset_name).items():
         lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
@@ -204,8 +224,7 @@ for root in IMAGE_DATASETS:
 if not paths and not RUNNING_ON_KAGGLE:
     _make_demo_images("_demo_images")
     IMAGE_DATASETS = ["_demo_images"]
-    dataset_name = "_demo_images"
-    for name, folder in discover_class_dirs("_demo_images").items():
+    for name, folder in discover_class_dirs("_demo_images", "_demo_images").items():
         lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
@@ -326,6 +345,9 @@ def resolve_label(rule, df, fname):
 def load_sensor_datasets(cfgs):
     frames, coverage = {}, []
     for cfg in cfgs:
+        if not cfg["path"]:
+            print(f"[skip] sensor dataset not attached (no /kaggle/input root found): {cfg['name']}")
+            continue
         files = sorted(glob.glob(cfg["path"], recursive=True)) if any(ch in cfg["path"] for ch in "*?[") \
                 else ([cfg["path"]] if os.path.isfile(cfg["path"]) else [])
         if not files:
