@@ -706,8 +706,11 @@ def decision_fusion_engine(image_path, sensor_feature_vector):
     z = np.concatenate([v, s])[np.newaxis, ...]
     index = float(fusion_engine.predict(z, verbose=0)[0][0]) * 100.0
     d = float(mahalanobis_distance(z[0]))
-    if d > MAH_THRESHOLD and (len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm")
-                              and sensor_feature_vector[FEATURE_COLS.index("ch2o_ppm")] > CH2O_ALERT_PPM):
+    if d > MAH_THRESHOLD and len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
+        i_ch2o = FEATURE_COLS.index("ch2o_ppm")
+        lo, hi = bounds["ch2o_ppm"]
+        raw_ch2o = sensor_feature_vector[i_ch2o] * (hi - lo) + lo   # unscale [0,1] -> ppm
+        if raw_ch2o > CH2O_ALERT_PPM:
         return {"freshness_index": round(index, 1), "mahalanobis": round(d, 2),
                 "state": "CHEMICAL MASKING ALERT — visual freshness contradicts toxic gas profile"}
     if index >= 70:
