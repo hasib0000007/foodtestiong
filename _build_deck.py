@@ -321,12 +321,12 @@ footer(s, n)
 
 # ================= SLIDE 9 — Decoupled training =================
 n += 1; s = slide(); header(s, "Decoupled Branch Training — Image & Sensor Separately", n)
-txt(s, 0.55, 1.3, 12.2, 0.55, [("Requirement: image dataset and sensor dataset are trained completely separately; the two 1-D feature spaces are joined only at fusion — this keeps the TinyML pipeline modular and memory-budgeted.",
+txt(s, 0.55, 1.3, 12.2, 0.55, [("Requirement: 100% Kaggle data (no primary collection). Image branch trains across 3-4 public datasets and sensor branch across 3-4 public CSVs — completely separately; the two feature spaces are joined only at fusion.",
                                 dict(size=13.5, color=DARKT))])
 box(s, 0.6, 2.1, 3.9, 2.6, "", LGREY)
 txt(s, 0.75, 2.2, 3.6, 0.4, [("PART A — IMAGE BRANCH", dict(size=13, bold=True, color=GREEN))])
 bullets(s, 0.75, 2.65, 3.6, 2.0, [
-    "Kaggle fresh/stale image datasets",
+    "3-4 Kaggle datasets merged: fruits + fish + meat",
     "MobileNetV2 (alpha 0.35) transfer learning",
     "224×224, [0,1] normalization",
     "Binary fresh/stale head (sigmoid)",
@@ -335,10 +335,10 @@ bullets(s, 0.75, 2.65, 3.6, 2.0, [
 box(s, 4.72, 2.1, 3.9, 2.6, "", LGREY)
 txt(s, 4.87, 2.2, 3.6, 0.4, [("PART B — SENSOR BRANCH", dict(size=13, bold=True, color=GREEN))])
 bullets(s, 4.87, 2.65, 3.6, 2.0, [
-    "CH2O / VOC / temps / RH telemetry",
+    "3-4 Kaggle sensor CSVs (MQ e-nose, temp/RH logs)",
+    "Per-dataset mapping + missing-channel flags",
     "Min-max + moving-average smoothing",
-    "MLP 64-32-16 (dropout regularized)",
-    "3-state softmax: fresh / stale / masked",
+    "Channel-aware MLP 64-32-16 (16-D input)",
     "Output: Fs = 16-D feature extractor",
 ], size=10.5, gap=2)
 box(s, 8.84, 2.1, 3.95, 2.6, "", LGREY)
@@ -350,6 +350,8 @@ bullets(s, 8.99, 2.65, 3.65, 2.0, [
     "Mahalanobis Distance anomaly layer",
     "Export: INT8 TFLite + C array + edge JSON",
 ], size=10.5, gap=2)
+txt(s, 0.6, 4.85, 12.2, 0.35, [("Missing-channel strategy: coverage report (dataset × channel) auto-detects gaps and names the exact extra Kaggle dataset to attach.",
+                               dict(size=12, italic=True, color=GREEN))])
 box(s, 0.6, 5.1, 12.2, 1.35, "Frequency mapping to thesis flow (Slide 8):  Camera→MobileNetV2  |  ZE08+BME680+MLX90614→Normalization→MLP  |  [Fv|Fs]→Mahalanobis→Decision Fusion→Results",
     NAVY, size=12.5)
 footer(s, n)
@@ -366,11 +368,11 @@ deftable(s, 0.55, 1.45, 7.4,
             ["Epochs", "[XX] + [XX]", "[XX]", "[XX]"],
          ],
          colw=[2.0, 2.1, 1.6, 1.7], fsize=10, hsize=10.5)
-card(s, 8.2, 1.45, 4.6, 3.0, "Kaggle Workflow", [
-    "• Import notebook → attach fresh/stale image dataset",
-    "• SENSOR_CSV = None → built-in 96 h synthetic decay generator (26-36 °C, formalin masking) until physical data is ready",
+card(s, 8.2, 1.45, 4.6, 3.0, "Kaggle Workflow (100% public data)", [
+    "• Import notebook → attach 3-4 image + 3-4 sensor CSV datasets",
+    "• Coverage report maps every channel; gaps auto-flagged with the exact extra dataset to attach",
+    "• Masked class: controlled simulated adulteration augmentation (25%)",
     "• GPU T4 → Run All → models, plots, .tflite in /kaggle/working/outputs",
-    "• Reproducible: notebooks/food_freshness_kaggle_training.ipynb",
 ], tc=GREEN, tsize=12.5, bsize=10.5)
 card(s, 0.55, 4.75, 12.25, 1.8, "Generated Thesis Evidence (auto-plots)", [
     "Adulteration boundary scatter (CH2O vs VOC)   •   Sensor cross-correlation heatmap   •   Confusion matrices (3-state)   •   Branch training curves   •   Fusion convergence",
