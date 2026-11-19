@@ -694,9 +694,13 @@ print("Fused feature matrix Z:", Z.shape)
 # %%
 def fit_mahalanobis(Z_fresh):
     mean = Z_fresh.mean(axis=0)
-    cov = np.cov(Z_fresh.T) + 1e-4 * np.eye(Z_fresh.shape[1])   # regularized covariance
+    n_dim = Z_fresh.shape[1]
+    cov = np.cov(Z_fresh.T)
+    mu = np.trace(cov) / n_dim            # average per-dimension variance
+    lam = 0.10                            # Ledoit-Wolf-style shrinkage: keeps the inverse
+    cov = (1.0 - lam) * cov + lam * mu * np.eye(n_dim) + 1e-6 * np.eye(n_dim)  # numerically stable
     inv_cov = np.linalg.inv(cov)
-    thr = chi2.ppf(0.99, df=Z_fresh.shape[1])                   # 99 % confidence boundary
+    thr = chi2.ppf(0.99, df=n_dim)        # 99 % confidence boundary
     return mean, inv_cov, math.sqrt(thr)
 
 z_fresh = Z[pair_state == 1]
