@@ -95,6 +95,7 @@ IMAGE_DATASETS = [p for p in (find_ds("fresh-and-stale"), find_ds("tilapia"),
 print("Auto-detected image datasets:", IMAGE_DATASETS)
 IMG_VAL_FRACTION = 0.15
 BATCH = 32
+BATCH_SENSOR = 256          # larger batch for the ~50k-row sensor table
 EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
 EPOCHS_FINETUNE = 2        # Part A, phase 2 (fine-tune last backbone block, 0 = skip)
 EPOCHS_SENSOR = 30         # Part B
@@ -485,9 +486,16 @@ def generate_masking_augment(df, fraction):
 
 sensor_df = generate_masking_augment(sensor_df, MASK_AUGMENT_FRACTION)
 
+for c in SENSOR_COLS:                       # final NaN/Inf cleanup (guards loss: nan)
+    sensor_df[c] = np.nan_to_num(sensor_df[c].values, nan=0.0, posinf=0.0, neginf=0.0)
+for a in AV_COLS:
+    sensor_df[a] = np.nan_to_num(sensor_df[a].values, nan=0.0, posinf=1.0, neginf=0.0)
+
 fig, ax = plt.subplots(figsize=(7, 5))
 for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (simulated)", "tab:red")]:
     d = sensor_df[sensor_df.label == lab]
+    if len(d) > 2000:
+        d = d.sample(2000, random_state=SEED)
     ax.scatter(d.ch2o_ppm, d.voc_log_ohm, s=12, alpha=0.6, c=c, label=name)
 ax.set_xlabel("Formaldehyde-family CH2O (ppm) — ZE08/MQ135"); ax.set_ylabel("VOC log(Ω) — BME680/MQ2")
 ax.set_title("Adulteration Boundary Scatterplot (CH2O vs VOC)"); ax.legend()
@@ -520,13 +528,14 @@ FEATURE_COLS = SENSOR_COLS + AV_COLS                    # values + availability 
 idx = np.random.permutation(len(smoothed))
 n_val = int(0.15 * len(smoothed))
 va, tr = idx[:n_val], idx[n_val:]
-X_tr = smoothed[FEATURE_COLS].values[tr];  y_tr = smoothed.label.values[tr]
-X_va = smoothed[FEATURE_COLS].values[va];  y_va = smoothed.label.values[va]
+X_tr = smoothed[FEATURE_COLS].values[tr].astype(np.float32);  y_tr = smoothed.label.values[tr]
+X_va = smoothed[FEATURE_COLS].values[va].astype(np.float32);  y_va = smoothed.label.values[va]
 SENSOR_EMBED = 16  # telemetry feature vector length (counterpart of Fv)
 
 def build_sensor_branch(n_in):
     inp = keras.Input(shape=(n_in,), name="sensor_input")
-    x = layers.Dense(64, activation="relu")(inp)
+    x = layers.BatchNormalization()(inp)
+    x = layers.Dense(64, activation="relu")(x)
     x = layers.Dropout(0.2)(x)
     x = layers.Dense(32, activation="relu")(x)
     x = layers.Dense(SENSOR_EMBED, activation="relu", name="sensor_embedding")(x)  # Fs feature vector
@@ -537,9 +546,10 @@ def build_sensor_branch(n_in):
     return branch, feat
 
 sensor_branch, sensor_feature_extractor = build_sensor_branch(len(FEATURE_COLS))
-sensor_branch.compile(optimizer=keras.optimizers.Adam(1e-3), loss="sparse_categorical_crossentropy",
-                      metrics=["accuracy"])
-hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va), epochs=EPOCHS_SENSOR, verbose=2)
+sensor_branch.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0),
+                      loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va),
+                       batch_size=BATCH_SENSOR, epochs=EPOCHS_SENSOR, verbose=2)
 
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1); plt.plot(hs.history["loss"], label="train"); plt.plot(hs.history["val_loss"], label="val")
@@ -548,12 +558,12 @@ plt.subplot(1, 2, 2); plt.plot(hs.history["accuracy"], label="train"); plt.plot(
 plt.title("Sensor branch — accuracy"); plt.legend()
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_branch_training.png", dpi=150); plt.show()
 
-y_pred = np.argmax(sensor_branch.predict(X_va, verbose=0), axis=1)
+y_pred = np.argmax(sensor_branch.predict(X_va, batch_size=BATCH_SENSOR, verbose=0), axis=1)
 cm = confusion_matrix(y_va, y_pred)
-ConfusionMatrixDisplay(cm, display_labels=["Fresh", "Stale", "Masked"]).plot(cmap="Blues")
+ConfusionMatrixDisplay(cm, display_labels=["Stale", "Fresh", "Masked"]).plot(cmap="Blues")
 plt.title("Sensor branch — Confusion Matrix")
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_confusion_matrix.png", dpi=150); plt.show()
-print(classification_report(y_va, y_pred, target_names=["Fresh", "Stale", "Masked"], digits=3,
+print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Masked"], digits=3,
                             zero_division=0))
 
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
