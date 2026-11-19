@@ -23,7 +23,7 @@ Optional swap: [Meat Quality Assessment (ASYU 2019)](https://www.kaggle.com/data
 | # | Dataset | Channels it covers | Notes |
 |---|---|---|---|
 | 1 | [Fruit Freshness Electronic Nose Dataset](https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data) | VOC (MQ2-class), CH2O-family gas (MQ135), day/time index | Real MOS e-nose telemetry; 59 per-fruit decay CSVs; CC BY 4.0; DOI: 10.5281/zenodo.17285312 |
-| 2 | [Chicken Meat Freshness Dataset](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset) | Core/ambient temperature, humidity, quality-stage labels | Meat-side sensor coverage |
+| 2 | [Chicken Meat Freshness Dataset](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset) | 10 virtual VOC channels (+ mean/variance), fresh vs frozen-thawed shelf-life labels (1,000 rows) | Meat-side VOC coverage — matches a ZE08/BME680-style gas curve |
 | 3 | [Dataset of Formalin Tofu Aroma](https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin) | Gas ppm array (MQ2/MQ4), product temperature, **formalin-treatment label** (45,000 rows, CC0) | Closest public proxy for ZE08-CH2O: real chemical-adulteration labels on gas-sensor food data |
 | 4 | [IoT Agriculture 2024](https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024) | Ambient temperature + RH time series | Fills the BME680 environmental channels; strengthens the drift-compensation story |
 
@@ -57,10 +57,27 @@ uncovered (see `[MISSING DATA]` output + `sensor_dataset_coverage.csv`):
 |---|---|
 | `ch2o_ppm` | attach the [Formalin Tofu Aroma dataset](https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin) or any MQ135 gas-sensor CSV |
 | `voc_log_ohm` | attach the [Fruit E-Nose MQ dataset](https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data); [BME688 Odours](https://www.kaggle.com/datasets/laurabasa/bme688-odours) as the real-Bosch reference |
-| `core_temp_c` | attach [Chicken Meat Freshness](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset) or the Formalin Tofu `Temperature(C)` column |
+| `core_temp_c` | attach the Formalin Tofu `Temperature(C)` column or any food-storage temperature CSV |
 | `ambient_temp_c`, `humidity_pct` | attach any IoT food-storage / cold-chain temp-RH CSV (e.g. [IoT Agriculture 2024](https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024)) |
 | `hours_elapsed` | usually derivable from timestamps or per-file day indices — no dataset needed |
 | `ch2o_voc_ratio`, `temp_rise_rate` | derived automatically from their parent channels — never need a dataset |
+
+## Recommended data volumes for a standard training run
+
+| Branch | Minimum (works) | Standard (recommended) | Ideal (best results) |
+|---|---|---|---|
+| Image (Part A) | 10,000 images | **24,000 — the 3-dataset combo above** | 95,000 — also attach the 70k set |
+| Sensor (Part B) | 5,000 rows | **50,000 rows — tofu 45k + e-nose + chicken + IoT** | 100,000 rows (add any extra gas-sensor CSV) |
+| Fusion pairs (Part C) | 100 pairs | **400 pairs (`PAIR_LIMIT = 400`)** | 1,000 pairs (raise `PAIR_LIMIT`) |
+
+Notes for the thesis:
+- Per class balance: keep fresh/stale roughly 50/50 (all four image datasets and the
+  tofu label split are already near-balanced).
+- With `IMG_AUGMENT = True`, each image acts as ~20 training views, so even the
+  24,000-image standard set gives an effective ~500,000 training views — more than
+  enough for MobileNetV2 (alpha=0.35) transfer learning.
+- The sensor MLP has only 16 input features; 50k rows is already 10x the samples-per-feature
+  rule of thumb — do not expect accuracy gains beyond ~100k rows.
 
 ## Kaggle assembly steps
 

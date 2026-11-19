@@ -74,14 +74,28 @@ print("GPU:", tf.config.list_physical_devices("GPU"))
 # obtain that class — state it as "simulated adulteration augmentation" in the thesis.
 
 # %%
-IMAGE_DATASETS = [
+def find_ds(*keywords):
+    """Return the top-level /kaggle/input/<slug> folder whose basename contains ALL keywords."""
+    if not RUNNING_ON_KAGGLE:
+        return None
+    for root in sorted(glob.glob("/kaggle/input/*")):
+        base = os.path.basename(root).lower()
+        if all(k in base for k in keywords):
+            return root
+    return None
+
+_IMAGE_FALLBACK = [
     "/kaggle/input/fresh-and-stale-images-of-fruits-and-vegetables",   # fruits (raghavrpotdar)
     "/kaggle/input/tilapia-fish-fresh-and-non-fresh-species",          # fish (haripriyasanga)
     "/kaggle/input/meat-freshness-image-dataset",                      # meat (vinayakshanawad)
     # "/kaggle/input/food-freshness-dataset",                          # optional 70k ablation set
 ]
+IMAGE_DATASETS = [p for p in (find_ds("fresh-and-stale"), find_ds("tilapia"),
+                              find_ds("meat-freshness-image")) if p] or _IMAGE_FALLBACK
+print("Auto-detected image datasets:", IMAGE_DATASETS)
 IMG_VAL_FRACTION = 0.15
 BATCH = 32
+BATCH_SENSOR = 256          # larger batch for the ~50k-row sensor table
 EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
 EPOCHS_FINETUNE = 2        # Part A, phase 2 (fine-tune last backbone block, 0 = skip)
 EPOCHS_SENSOR = 30         # Part B
@@ -90,11 +104,14 @@ PAIR_LIMIT = 400           # max paired samples for the fusion set
 
 MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows added to Part B
 
+IMG_AUGMENT = True            # random flip/rotation/zoom inside the image branch —
+                              # multiplies the effective training-set size for free
+
 # recommended extra Kaggle dataset per missing channel (printed by the coverage report)
 MISSING_CHANNEL_GUIDE = {
     "ch2o_ppm":      "attach [Dataset of Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (formalin-labeled gas-sensor food data — closest public proxy for the ZE08-CH2O) or any MQ135 gas-sensor CSV",
     "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135) or [BME688 Odours] https://www.kaggle.com/datasets/laurabasa/bme688-odours (real Bosch BME68x gas resistance — same family as our BME680)",
-    "core_temp_c":   "attach [Chicken Meat Freshness Dataset (sensor-based)] https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset or [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column)",
+    "core_temp_c":   "attach [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column) or any food-storage temperature CSV",
     "ambient_temp_c":"attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "humidity_pct":  "attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "ch2o_voc_ratio":"derived automatically from ch2o_ppm and voc_log_ohm — no extra dataset needed",
@@ -102,27 +119,35 @@ MISSING_CHANNEL_GUIDE = {
     "hours_elapsed": "usually derivable from timestamps or file/day indices; else attach any time-series food CSV",
 }
 
-# each sensor dataset: path/glob + column mapping (canonical -> raw column or None)
+# each sensor dataset: path/glob (auto-resolved from /kaggle/input roots) + column mapping.
+# The recursive '**' glob picks up EVERY CSV in the dataset, whatever the folder layout.
+SENSOR_ROOTS = {
+    "enose_fruits":   find_ds("electronic-nose") or find_ds("e-nose"),
+    "chicken_sensor": find_ds("chicken-meat"),
+    "tofu_formalin":  find_ds("aroma-tahu") or find_ds("formalin-tofu"),
+}
+print("Auto-resolved sensor roots:", SENSOR_ROOTS)
 SENSOR_CSVS = [
     # --- e-nose MQ dataset (real hardware telemetry; decay day-series per fruit) ---
     {"name": "enose_fruits",
-     "path": "/kaggle/input/food-freshness-electronic-nose-data/**/*.csv",
+     "path": os.path.join(SENSOR_ROOTS["enose_fruits"], "**", "*.csv") if SENSOR_ROOTS["enose_fruits"] else "",
      "label_rule": {"type": "day_decay", "fresh_days": [1, 2], "stale_days": [3, 4, 5]},
      "mapping": {"voc_log_ohm": "MQ2", "ch2o_ppm": "MQ135",      # MQ135 responds to aldehyde-family gases
                  "core_temp_c": None, "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
-    # --- chicken meat sensor-graded dataset (temperature-related channels) ---
+    # --- chicken meat dataset: 10 virtual VOC channels + mean/variance + Target ---
+    # real columns: sensor-level VOC values, 'mean', 'variance', 'target'
+    # ('Fresh_Day4' / 'FrozenThawed_Day6') — no temperature/humidity columns here.
     {"name": "chicken_sensor",
-     "path": "/kaggle/input/chicken-meat-freshness-dataset/*.csv",
-     "label_rule": {"type": "column", "col": "label"},
-     "mapping": {"core_temp_c": "temperature", "ambient_temp_c": "ambient_temperature",
-                 "humidity_pct": "humidity", "voc_log_ohm": None,
-                 "ch2o_ppm": None, "hours_elapsed": None}},
+     "path": os.path.join(SENSOR_ROOTS["chicken_sensor"], "**", "*.csv") if SENSOR_ROOTS["chicken_sensor"] else "",
+     "label_rule": {"type": "text", "col": "target"},
+     "mapping": {"voc_log_ohm": "mean", "ch2o_ppm": None, "core_temp_c": None,
+                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": None}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
     # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
     # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
     {"name": "tofu_formalin",
-     "path": "/kaggle/input/dataset-aroma-tahu-berfomalin/*.csv",
+     "path": os.path.join(SENSOR_ROOTS["tofu_formalin"], "**", "*.csv") if SENSOR_ROOTS["tofu_formalin"] else "",
      "label_rule": {"type": "column", "col": "label"},
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
@@ -152,7 +177,7 @@ SENSOR_CSVS = [
 # map to label 0 (`non-fresh` also counts as stale). Per-dataset counts are printed.
 
 # %%
-def discover_class_dirs(root):
+def discover_class_dirs(root, dataset_name):
     class_dirs = {}
     for d in sorted(glob.glob(os.path.join(root, "**/"), recursive=True)):
         d = d.rstrip(os.sep)
@@ -188,7 +213,7 @@ for root in IMAGE_DATASETS:
         continue
     dataset_name = os.path.basename(root.rstrip("/"))
     n0 = len(paths)
-    for name, folder in discover_class_dirs(root).items():
+    for name, folder in discover_class_dirs(root, dataset_name).items():
         lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
@@ -200,8 +225,7 @@ for root in IMAGE_DATASETS:
 if not paths and not RUNNING_ON_KAGGLE:
     _make_demo_images("_demo_images")
     IMAGE_DATASETS = ["_demo_images"]
-    dataset_name = "_demo_images"
-    for name, folder in discover_class_dirs("_demo_images").items():
+    for name, folder in discover_class_dirs("_demo_images", "_demo_images").items():
         lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
@@ -241,6 +265,10 @@ train_ds, val_ds = make_ds(tr_idx, True), make_ds(val_idx, False)
 def build_image_branch():
     inp = keras.Input(shape=(*IMG_SIZE, 3), name="image_input")
     x = layers.Rescaling(2.0, offset=-1.0, name="to_imagenet_range")(inp)  # [0,1] -> [-1,1] (ImageNet conv)
+    if IMG_AUGMENT:   # active only during .fit(); disabled at inference/INT8 export
+        x = layers.RandomFlip("horizontal", name="aug_flip")(x)
+        x = layers.RandomRotation(0.08, name="aug_rot")(x)
+        x = layers.RandomZoom(0.08, name="aug_zoom")(x)
     base = keras.applications.MobileNetV2(
         input_shape=(*IMG_SIZE, 3), alpha=ALPHA, include_top=False, weights="imagenet")
     base.trainable = False
@@ -256,7 +284,8 @@ def build_image_branch():
 image_branch, image_feature_extractor = build_image_branch()
 image_branch.compile(optimizer=keras.optimizers.Adam(1e-3),
                      loss="binary_crossentropy", metrics=["accuracy"])
-h1 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_HEAD, verbose=2)
+h1 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_HEAD, verbose=2,
+                      callbacks=[keras.callbacks.TerminateOnNaN()])
 
 if EPOCHS_FINETUNE > 0:
     backbone = next(l for l in image_branch.layers if isinstance(l, keras.Model))  # MobileNetV2 backbone
@@ -265,7 +294,8 @@ if EPOCHS_FINETUNE > 0:
         layer.trainable = False
     image_branch.compile(optimizer=keras.optimizers.Adam(1e-5),
                          loss="binary_crossentropy", metrics=["accuracy"])
-    h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2)
+    h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2,
+                          callbacks=[keras.callbacks.TerminateOnNaN()])
     hist = {k: h1.history[k] + h2.history[k] for k in h1.history}
 else:
     hist = h1.history
@@ -302,6 +332,13 @@ def resolve_label(rule, df, fname):
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
         y = pd.to_numeric(df[col], errors="coerce")
         return y.fillna(1).astype(int).values
+    if t == "text":           # string labels like 'Fresh_Day4' vs 'FrozenThawed_Day6'
+        col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
+        assert col is not None, f"{fname}: label column '{rule['col']}' not found"
+        sl = df[col].astype(str).str.lower()
+        y = sl.str.contains(rule.get("fresh_match", "fresh"), regex=False) \
+            & ~sl.str.contains(rule.get("stale_match", "\x00"), regex=False)
+        return y.astype(int).values
     if t == "day_decay":      # filenames like 'Banana D3.csv' — later days are staler
         seq = fname.rsplit(".", 1)[0].lower().split()[-1].lstrip("d")
         day = int(seq) if seq.isdigit() else 1
@@ -311,6 +348,9 @@ def resolve_label(rule, df, fname):
 def load_sensor_datasets(cfgs):
     frames, coverage = {}, []
     for cfg in cfgs:
+        if not cfg["path"]:
+            print(f"[skip] sensor dataset not attached (no /kaggle/input root found): {cfg['name']}")
+            continue
         files = sorted(glob.glob(cfg["path"], recursive=True)) if any(ch in cfg["path"] for ch in "*?[") \
                 else ([cfg["path"]] if os.path.isfile(cfg["path"]) else [])
         if not files:
@@ -448,9 +488,16 @@ def generate_masking_augment(df, fraction):
 
 sensor_df = generate_masking_augment(sensor_df, MASK_AUGMENT_FRACTION)
 
+for c in SENSOR_COLS:                       # final NaN/Inf cleanup (guards loss: nan)
+    sensor_df[c] = np.nan_to_num(sensor_df[c].values, nan=0.0, posinf=0.0, neginf=0.0)
+for a in AV_COLS:
+    sensor_df[a] = np.nan_to_num(sensor_df[a].values, nan=0.0, posinf=1.0, neginf=0.0)
+
 fig, ax = plt.subplots(figsize=(7, 5))
 for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (simulated)", "tab:red")]:
     d = sensor_df[sensor_df.label == lab]
+    if len(d) > 2000:
+        d = d.sample(2000, random_state=SEED)
     ax.scatter(d.ch2o_ppm, d.voc_log_ohm, s=12, alpha=0.6, c=c, label=name)
 ax.set_xlabel("Formaldehyde-family CH2O (ppm) — ZE08/MQ135"); ax.set_ylabel("VOC log(Ω) — BME680/MQ2")
 ax.set_title("Adulteration Boundary Scatterplot (CH2O vs VOC)"); ax.legend()
@@ -471,25 +518,45 @@ plt.tight_layout(); plt.savefig(f"{OUT}/sensor_correlation.png", dpi=150); plt.s
 # ### B3. Preprocess (min-max + moving average + availability flags) and train the channel-aware MLP
 
 # %%
-bounds = {c: (sensor_df[c].min(), sensor_df[c].max()) for c in SENSOR_COLS}
+bounds = {c: (float(sensor_df[c].min()), float(sensor_df[c].max())) for c in SENSOR_COLS}
 scaled = sensor_df.copy()
 for c in SENSOR_COLS:                                   # proposal: min-max scaling
     lo, hi = bounds[c]
-    scaled[c] = (sensor_df[c] - lo) / max(hi - lo, 1e-9)
+    scaled[c] = np.clip((sensor_df[c] - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
 smoothed = scaled.copy()                                # proposal: moving-average smoothing
-smoothed[SENSOR_COLS] = ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0)
+smoothed[SENSOR_COLS] = np.clip(
+    ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0), 0.0, 1.0)
 
 FEATURE_COLS = SENSOR_COLS + AV_COLS                    # values + availability flags
 idx = np.random.permutation(len(smoothed))
 n_val = int(0.15 * len(smoothed))
 va, tr = idx[:n_val], idx[n_val:]
-X_tr = smoothed[FEATURE_COLS].values[tr];  y_tr = smoothed.label.values[tr]
-X_va = smoothed[FEATURE_COLS].values[va];  y_va = smoothed.label.values[va]
+X = smoothed[FEATURE_COLS].values.astype(np.float32)
+y = smoothed.label.values.astype(np.int32)
+
+# ---- pre-training data-sanity report: proves loss:nan cannot come from the inputs ----
+print("\n[DATA SANITY] rows per dataset:")
+print(sensor_df["dataset"].value_counts().to_string())
+print("\n[DATA SANITY] per-channel statistics (after NaN/Inf cleanup + min-max scaling):")
+for c in SENSOR_COLS:
+    v = sensor_df[c].values
+    n_nan = int(np.isnan(v).sum()); n_inf = int(np.isinf(v).sum())
+    print(f"  {c:16s} min={v.min():12.4g} max={v.max():12.4g} nan={n_nan} inf={n_inf}")
+assert np.isfinite(X).all(), (
+    "[DATA SANITY] X still contains NaN/Inf — paste this report back to the chat so the "
+    "offending dataset can be identified.")
+assert np.isin(np.unique(y), [0, 1, 2]).all(), "[DATA SANITY] labels must be 0/1/2"
+print(f"[DATA SANITY] X_tr/X_va finite={np.isfinite(X).all()}, "
+      f"X_min={X.min():.4f}, X_max={X.max():.4f} — inputs are clean ✓")
+
+X_tr, y_tr = X[tr], y[tr]
+X_va, y_va = X[va], y[va]
 SENSOR_EMBED = 16  # telemetry feature vector length (counterpart of Fv)
 
 def build_sensor_branch(n_in):
     inp = keras.Input(shape=(n_in,), name="sensor_input")
-    x = layers.Dense(64, activation="relu")(inp)
+    x = layers.BatchNormalization()(inp)
+    x = layers.Dense(64, activation="relu")(x)
     x = layers.Dropout(0.2)(x)
     x = layers.Dense(32, activation="relu")(x)
     x = layers.Dense(SENSOR_EMBED, activation="relu", name="sensor_embedding")(x)  # Fs feature vector
@@ -500,9 +567,11 @@ def build_sensor_branch(n_in):
     return branch, feat
 
 sensor_branch, sensor_feature_extractor = build_sensor_branch(len(FEATURE_COLS))
-sensor_branch.compile(optimizer=keras.optimizers.Adam(1e-3), loss="sparse_categorical_crossentropy",
-                      metrics=["accuracy"])
-hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va), epochs=EPOCHS_SENSOR, verbose=2)
+sensor_branch.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0),
+                      loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va),
+                       batch_size=BATCH_SENSOR, epochs=EPOCHS_SENSOR, verbose=2,
+                       callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1); plt.plot(hs.history["loss"], label="train"); plt.plot(hs.history["val_loss"], label="val")
@@ -511,12 +580,12 @@ plt.subplot(1, 2, 2); plt.plot(hs.history["accuracy"], label="train"); plt.plot(
 plt.title("Sensor branch — accuracy"); plt.legend()
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_branch_training.png", dpi=150); plt.show()
 
-y_pred = np.argmax(sensor_branch.predict(X_va, verbose=0), axis=1)
+y_pred = np.argmax(sensor_branch.predict(X_va, batch_size=BATCH_SENSOR, verbose=0), axis=1)
 cm = confusion_matrix(y_va, y_pred)
-ConfusionMatrixDisplay(cm, display_labels=["Fresh", "Stale", "Masked"]).plot(cmap="Blues")
+ConfusionMatrixDisplay(cm, display_labels=["Stale", "Fresh", "Masked"]).plot(cmap="Blues")
 plt.title("Sensor branch — Confusion Matrix")
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_confusion_matrix.png", dpi=150); plt.show()
-print(classification_report(y_va, y_pred, target_names=["Fresh", "Stale", "Masked"], digits=3,
+print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Masked"], digits=3,
                             zero_division=0))
 
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
@@ -601,9 +670,11 @@ def build_fusion_engine():
     return keras.Model(inp, out, name="fusion_engine")
 
 fusion_engine = build_fusion_engine()
-fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mae", metrics=[keras.metrics.MeanAbsoluteError()])
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
-hf = fusion_engine.fit(Z, freshness_gt, validation_split=0.15, epochs=EPOCHS_FUSION, verbose=2)
+fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0), loss="mae")
+hf = fusion_engine.fit(Z, freshness_gt.astype(np.float32), validation_split=0.15,
+                       epochs=EPOCHS_FUSION, verbose=2,
+                       callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.plot(hf.history["loss"], label="train"); plt.plot(hf.history["val_loss"], label="val")
 plt.title("Fusion engine — MAE loss"); plt.xlabel("epoch"); plt.legend()
