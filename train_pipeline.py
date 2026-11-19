@@ -284,7 +284,8 @@ def build_image_branch():
 image_branch, image_feature_extractor = build_image_branch()
 image_branch.compile(optimizer=keras.optimizers.Adam(1e-3),
                      loss="binary_crossentropy", metrics=["accuracy"])
-h1 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_HEAD, verbose=2)
+h1 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_HEAD, verbose=2,
+                      callbacks=[keras.callbacks.TerminateOnNaN()])
 
 if EPOCHS_FINETUNE > 0:
     backbone = next(l for l in image_branch.layers if isinstance(l, keras.Model))  # MobileNetV2 backbone
@@ -293,7 +294,8 @@ if EPOCHS_FINETUNE > 0:
         layer.trainable = False
     image_branch.compile(optimizer=keras.optimizers.Adam(1e-5),
                          loss="binary_crossentropy", metrics=["accuracy"])
-    h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2)
+    h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2,
+                          callbacks=[keras.callbacks.TerminateOnNaN()])
     hist = {k: h1.history[k] + h2.history[k] for k in h1.history}
 else:
     hist = h1.history
@@ -516,20 +518,39 @@ plt.tight_layout(); plt.savefig(f"{OUT}/sensor_correlation.png", dpi=150); plt.s
 # ### B3. Preprocess (min-max + moving average + availability flags) and train the channel-aware MLP
 
 # %%
-bounds = {c: (sensor_df[c].min(), sensor_df[c].max()) for c in SENSOR_COLS}
+bounds = {c: (float(sensor_df[c].min()), float(sensor_df[c].max())) for c in SENSOR_COLS}
 scaled = sensor_df.copy()
 for c in SENSOR_COLS:                                   # proposal: min-max scaling
     lo, hi = bounds[c]
-    scaled[c] = (sensor_df[c] - lo) / max(hi - lo, 1e-9)
+    scaled[c] = np.clip((sensor_df[c] - lo) / max(hi - lo, 1e-9), 0.0, 1.0)
 smoothed = scaled.copy()                                # proposal: moving-average smoothing
-smoothed[SENSOR_COLS] = ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0)
+smoothed[SENSOR_COLS] = np.clip(
+    ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0), 0.0, 1.0)
 
 FEATURE_COLS = SENSOR_COLS + AV_COLS                    # values + availability flags
 idx = np.random.permutation(len(smoothed))
 n_val = int(0.15 * len(smoothed))
 va, tr = idx[:n_val], idx[n_val:]
-X_tr = smoothed[FEATURE_COLS].values[tr].astype(np.float32);  y_tr = smoothed.label.values[tr]
-X_va = smoothed[FEATURE_COLS].values[va].astype(np.float32);  y_va = smoothed.label.values[va]
+X = smoothed[FEATURE_COLS].values.astype(np.float32)
+y = smoothed.label.values.astype(np.int32)
+
+# ---- pre-training data-sanity report: proves loss:nan cannot come from the inputs ----
+print("\n[DATA SANITY] rows per dataset:")
+print(sensor_df["dataset"].value_counts().to_string())
+print("\n[DATA SANITY] per-channel statistics (after NaN/Inf cleanup + min-max scaling):")
+for c in SENSOR_COLS:
+    v = sensor_df[c].values
+    n_nan = int(np.isnan(v).sum()); n_inf = int(np.isinf(v).sum())
+    print(f"  {c:16s} min={v.min():12.4g} max={v.max():12.4g} nan={n_nan} inf={n_inf}")
+assert np.isfinite(X).all(), (
+    "[DATA SANITY] X still contains NaN/Inf — paste this report back to the chat so the "
+    "offending dataset can be identified.")
+assert np.isin(np.unique(y), [0, 1, 2]).all(), "[DATA SANITY] labels must be 0/1/2"
+print(f"[DATA SANITY] X_tr/X_va finite={np.isfinite(X).all()}, "
+      f"X_min={X.min():.4f}, X_max={X.max():.4f} — inputs are clean ✓")
+
+X_tr, y_tr = X[tr], y[tr]
+X_va, y_va = X[va], y[va]
 SENSOR_EMBED = 16  # telemetry feature vector length (counterpart of Fv)
 
 def build_sensor_branch(n_in):
@@ -546,10 +567,11 @@ def build_sensor_branch(n_in):
     return branch, feat
 
 sensor_branch, sensor_feature_extractor = build_sensor_branch(len(FEATURE_COLS))
-sensor_branch.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0),
+sensor_branch.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0),
                       loss="sparse_categorical_crossentropy", metrics=["accuracy"])
 hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va),
-                       batch_size=BATCH_SENSOR, epochs=EPOCHS_SENSOR, verbose=2)
+                       batch_size=BATCH_SENSOR, epochs=EPOCHS_SENSOR, verbose=2,
+                       callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1); plt.plot(hs.history["loss"], label="train"); plt.plot(hs.history["val_loss"], label="val")
@@ -648,9 +670,11 @@ def build_fusion_engine():
     return keras.Model(inp, out, name="fusion_engine")
 
 fusion_engine = build_fusion_engine()
-fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-3), loss="mae", metrics=[keras.metrics.MeanAbsoluteError()])
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
-hf = fusion_engine.fit(Z, freshness_gt, validation_split=0.15, epochs=EPOCHS_FUSION, verbose=2)
+fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0), loss="mae")
+hf = fusion_engine.fit(Z, freshness_gt.astype(np.float32), validation_split=0.15,
+                       epochs=EPOCHS_FUSION, verbose=2,
+                       callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.plot(hf.history["loss"], label="train"); plt.plot(hf.history["val_loss"], label="val")
 plt.title("Fusion engine — MAE loss"); plt.xlabel("epoch"); plt.legend()

@@ -1,0 +1,49 @@
+{
+  "sensor_features": [
+    "ch2o_ppm",
+    "voc_log_ohm",
+    "core_temp_c",
+    "ambient_temp_c",
+    "humidity_pct",
+    "ch2o_voc_ratio",
+    "temp_rise_rate",
+    "hours_elapsed",
+    "av_ch2o_ppm",
+    "av_voc_log_ohm",
+    "av_core_temp_c",
+    "av_ambient_temp_c",
+    "av_humidity_pct",
+    "av_ch2o_voc_ratio",
+    "av_temp_rise_rate",
+    "av_hours_elapsed"
+  ],
+  "min": {
+    "ch2o_ppm": 4.020160414998171,
+    "voc_log_ohm": 27.841202406907904,
+    "core_temp_c": 36.67871173707768,
+    "ambient_temp_c": 24.097478259555746,
+    "humidity_pct": 35.89511203133432,
+    "ch2o_voc_ratio": 0.0,
+    "temp_rise_rate": 0.0,
+    "hours_elapsed": 0.0
+  },
+  "max": {
+    "ch2o_ppm": 214.3617652838542,
+    "voc_log_ohm": 205.12053333313332,
+    "core_temp_c": 200.74465666275802,
+    "ambient_temp_c": 31.98956876231845,
+    "humidity_pct": 200.8296926155589,
+    "ch2o_voc_ratio": 9.358951662624077e-40,
+    "temp_rise_rate": 0.0,
+    "hours_elapsed": 48.0
+  },
+  "mahalanobis_threshold": 13.652580909447451,
+  "ch2o_alert_ppm": 2.0,
+  "image_datasets": [
+    "_demo_images"
+  ],
+  "sensor_datasets": [
+    "enose_fruits",
+    "storage_iot"
+  ]
+}
