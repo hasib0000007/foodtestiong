@@ -53,10 +53,13 @@ flags, and prints exactly which extra Kaggle dataset closes the remaining holes
    - [Tilapia Fresh and Non Fresh (6,900)](https://www.kaggle.com/datasets/haripriyasanga/tilapia-fish-fresh-and-non-fresh-species)
    - [Meat Freshness Image Dataset](https://www.kaggle.com/datasets/vinayakshanawad/meat-freshness-image-dataset)
    - optional ablation: [Food Freshness Dataset (70k)](https://www.kaggle.com/datasets/ulnnproject/food-freshness-dataset)
-3. **Add Input** — attach 3–4 sensor CSV datasets (e.g.
-   [Fruit Freshness Electronic Nose Dataset](https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data)
-   and [Chicken Meat Freshness Dataset](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset))
-   and fill the `SENSOR_CSVS` config with each dataset's column mapping.
+3. **Add Input** — attach 3–4 sensor CSV datasets (the final combo in `DATASETS.md`):
+   [Fruit Freshness Electronic Nose Dataset](https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data),
+   [Chicken Meat Freshness Dataset](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset),
+   [Dataset of Formalin Tofu Aroma](https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin)
+   (closest public proxy for ZE08-CH2O), and
+   [IoT Agriculture 2024](https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024) (temp + RH gap-filler).
+   Fill the `SENSOR_CSVS` config with each dataset's column mapping.
    Unattached paths in both lists are skipped automatically — only run what you attach.
 4. **Missing-data behaviour:** the *coverage report* cell prints a dataset × channel
    table (`sensor_dataset_coverage.csv`). Any channel no dataset covers triggers a

@@ -92,9 +92,9 @@ MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows add
 
 # recommended extra Kaggle dataset per missing channel (printed by the coverage report)
 MISSING_CHANNEL_GUIDE = {
-    "ch2o_ppm":      "attach an MQ135/air-quality gas-sensor dataset (MQ135 reacts to CH2O-family aldehydes) — e.g. any 'gas sensor array' CSV on Kaggle",
-    "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135)",
-    "core_temp_c":   "attach [Chicken Meat Freshness Dataset (sensor-based)] https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset or any food storage temperature CSV",
+    "ch2o_ppm":      "attach [Dataset of Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (formalin-labeled gas-sensor food data — closest public proxy for the ZE08-CH2O) or any MQ135 gas-sensor CSV",
+    "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135) or [BME688 Odours] https://www.kaggle.com/datasets/laurabasa/bme688-odours (real Bosch BME68x gas resistance — same family as our BME680)",
+    "core_temp_c":   "attach [Chicken Meat Freshness Dataset (sensor-based)] https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset or [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column)",
     "ambient_temp_c":"attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "humidity_pct":  "attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "ch2o_voc_ratio":"derived automatically from ch2o_ppm and voc_log_ohm — no extra dataset needed",
@@ -118,7 +118,22 @@ SENSOR_CSVS = [
      "mapping": {"core_temp_c": "temperature", "ambient_temp_c": "ambient_temperature",
                  "humidity_pct": "humidity", "voc_log_ohm": None,
                  "ch2o_ppm": None, "hours_elapsed": None}},
-    # add a 3rd/4th dataset below following the same pattern — coverage auto-updates
+    # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
+    # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
+    # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
+    {"name": "tofu_formalin",
+     "path": "/kaggle/input/dataset-aroma-tahu-berfomalin/*.csv",
+     "label_rule": {"type": "column", "col": "label"},
+     "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
+                 "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
+                 "humidity_pct": None, "hours_elapsed": None}},
+    # optional 4th (gap-filler): any IoT temp/humidity CSV, e.g.
+    # {"name": "storage_env",
+    #  "path": "/kaggle/input/iot-agriculture-2024/*.csv",
+    #  "label_rule": {"type": "column", "col": "<label-col>"},
+    #  "mapping": {"ambient_temp_c": "<temp-col>", "humidity_pct": "<humidity-col>",
+    #              "ch2o_ppm": None, "voc_log_ohm": None, "core_temp_c": None,
+    #              "hours_elapsed": None}},
 ]
 # if no CSV is configured (e.g. dry run), the notebook falls back to its physics
 # simulator so every cell still executes; replace the list above for real runs.
