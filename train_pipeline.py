@@ -75,14 +75,24 @@ print("GPU:", tf.config.list_physical_devices("GPU"))
 
 # %%
 def find_ds(*keywords):
-    """Return the top-level /kaggle/input/<slug> folder whose basename contains ALL keywords."""
+    """Find a dataset folder ANYWHERE under /kaggle/input (some Kaggle sessions mount
+    attached datasets nested, e.g. /kaggle/input/datasets/<slug>). Returns the shallowest
+    (slug-level) folder whose basename contains ALL keywords."""
     if not RUNNING_ON_KAGGLE:
         return None
-    for root in sorted(glob.glob("/kaggle/input/*")):
-        base = os.path.basename(root).lower()
-        if all(k in base for k in keywords):
-            return root
-    return None
+    best, best_depth = None, 99
+    for dirpath, dirnames, _ in os.walk("/kaggle/input"):
+        base = os.path.basename(dirpath.rstrip(os.sep)).lower()
+        if base and all(k in base for k in keywords):
+            depth = dirpath[len("/kaggle/input"):].count(os.sep)
+            if depth < best_depth:
+                best, best_depth = dirpath, depth
+        if depth_of(dirpath) >= 3:
+            dirnames[:] = []                 # do not crawl into large content trees
+    return best
+
+def depth_of(path):
+    return path[len("/kaggle/input"):].strip(os.sep).count(os.sep) if len(path) > len("/kaggle/input") else 0
 
 _IMAGE_FALLBACK = [
     "/kaggle/input/fresh-and-stale-images-of-fruits-and-vegetables",   # fruits (raghavrpotdar)
