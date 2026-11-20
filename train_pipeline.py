@@ -123,8 +123,8 @@ MISSING_CHANNEL_GUIDE = {
     "ch2o_ppm":      "attach [Dataset of Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (formalin-labeled gas-sensor food data — closest public proxy for the ZE08-CH2O) or any MQ135 gas-sensor CSV",
     "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135) or [BME688 Odours] https://www.kaggle.com/datasets/laurabasa/bme688-odours (real Bosch BME68x gas resistance — same family as our BME680)",
     "core_temp_c":   "attach [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column) or any food-storage temperature CSV",
-    "ambient_temp_c":"attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
-    "humidity_pct":  "attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
+    "ambient_temp_c":"attach [IoT Agriculture 2024] https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024 (columns: temperature, humidity — auto-wired as the storage_env entry below) or any IoT temp-humidity CSV (DHT22 logs work too)",
+    "humidity_pct":  "attach [IoT Agriculture 2024] https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024 (columns: temperature, humidity — auto-wired as the storage_env entry below) or any IoT temp-humidity CSV (DHT22 logs work too)",
     "ch2o_voc_ratio":"derived automatically from ch2o_ppm and voc_log_ohm — no extra dataset needed",
     "temp_rise_rate":"derived automatically from core_temp_c and hours_elapsed — no extra dataset needed",
     "hours_elapsed": "usually derivable from timestamps or file/day indices; else attach any time-series food CSV",
@@ -136,6 +136,7 @@ SENSOR_ROOTS = {
     "enose_fruits":   find_ds("electronic-nose") or find_ds("e-nose"),
     "chicken_sensor": find_ds("chicken-meat"),
     "tofu_formalin":  find_ds("aroma-tahu") or find_ds("formalin-tofu"),
+    "storage_env":    find_ds("iot-agriculture"),   # gap-filler: ambient temp + humidity
 }
 print("Auto-resolved sensor roots:", SENSOR_ROOTS)
 SENSOR_CSVS = [
@@ -164,13 +165,17 @@ SENSOR_CSVS = [
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
-    # optional 4th (gap-filler): any IoT temp/humidity CSV, e.g.
-    # {"name": "storage_env",
-    #  "path": "/kaggle/input/iot-agriculture-2024/*.csv",
-    #  "label_rule": {"type": "column", "col": "<label-col>"},
-    #  "mapping": {"ambient_temp_c": "<temp-col>", "humidity_pct": "<humidity-col>",
-    #              "ch2o_ppm": None, "voc_log_ohm": None, "core_temp_c": None,
-    #              "hours_elapsed": None}},
+    # --- 4th gap-filler: IoT Agriculture 2024 (wisam1985) — closes ambient_temp_c/humidity_pct ---
+    # verified columns: date, temperature, humidity, water_level, N, P, K
+    # greenhouse IoT telemetry; no food-freshness ground truth, so it contributes
+    # REAL environment channels only ('constant' label rows keep part of B stale-side).
+    # alternative: any DHT22/DHT11 CSV — map its columns the same way.
+    {"name": "storage_env",
+     "path": os.path.join(SENSOR_ROOTS["storage_env"], "**", "*.csv") if SENSOR_ROOTS["storage_env"] else "",
+     "label_rule": {"type": "constant"},
+     "mapping": {"ambient_temp_c": "temperature", "humidity_pct": "humidity",
+                 "ch2o_ppm": None, "voc_log_ohm": None, "core_temp_c": None,
+                 "hours_elapsed": None}},
 ]
 # if no CSV is configured (e.g. dry run), the notebook falls back to its physics
 # simulator so every cell still executes; replace the list above for real runs.
