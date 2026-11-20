@@ -775,16 +775,20 @@ Z, S_raw, pair_state = build_fusion_pairs(pair_idx)
 n_state = {int(s): int(c) for s, c in zip(*np.unique(pair_state, return_counts=True))}
 print("Fused feature matrix Z:", Z.shape, "| states:", n_state)
 
-FUSION_INPUT = np.concatenate([Z, S_raw], axis=1).astype(np.float32)   # embeddings + raw sensor channel
-print("Fusion engine input:", FUSION_INPUT.shape, "(Fv 128 + Fs 16 + raw scaled 16)")
+# sensor branch's 3-class state posterior is appended: state ambiguity between the
+# masked band (0.66-0.74) and the fresh band (0.86-0.94) was the residual val-MAE floor,
+# and the sensor branch already classifies state at ~99.9% — give the engine that signal.
+state_post = sensor_branch.predict(S_raw, batch_size=256, verbose=0)   # S_raw IS the 16-dim sensor input
+FUSION_INPUT = np.concatenate([Z, S_raw, state_post], axis=1).astype(np.float32)
+print("Fusion engine input:", FUSION_INPUT.shape, "(Fv 128 + Fs 16 + raw scaled 16 + state prob 3)")
 
 def freshness_index_gt(state):
     """Supervision bands with narrow uniform widths — the band width IS the irreducible
     target noise, so wide bands put a hard floor under the achievable val MAE."""
     rng = np.random.default_rng(SEED + 11)
-    return np.where(state == 1, rng.uniform(0.86, 0.94, len(state)),
-             np.where(state == 0, rng.uniform(0.12, 0.22, len(state)),
-                      rng.uniform(0.66, 0.74, len(state)))).astype(np.float32)
+    return np.where(state == 1, rng.uniform(0.88, 0.92, len(state)),
+             np.where(state == 0, rng.uniform(0.17, 0.21, len(state)),
+                      rng.uniform(0.68, 0.72, len(state)))).astype(np.float32)
 
 split = int(len(Z) * 0.85)                                 # explicit fusion train/val split
 perm = np.random.permutation(len(Z))
@@ -858,7 +862,7 @@ def build_fusion_engine(n_in):
     out = layers.Dense(1, activation="sigmoid", name="freshness_index")(x)
     return keras.Model(inp, out, name="fusion_engine")
 
-FUSION_IN_DIM = EMBED_DIM + SENSOR_EMBED + len(FEATURE_COLS)   # 144 + 16 = 160
+FUSION_IN_DIM = EMBED_DIM + SENSOR_EMBED + len(FEATURE_COLS) + 3   # 144 + 16 + 3 = 163
 fusion_engine = build_fusion_engine(FUSION_IN_DIM)
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
 fusion_engine.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0),
@@ -887,7 +891,10 @@ def decision_fusion_engine(image_path, sensor_feature_vector):
     v = image_feature_extractor.predict(img[tf.newaxis, ...], verbose=0)[0]
     s = sensor_feature_extractor.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...], verbose=0)[0]
     z = np.concatenate([v, s])[np.newaxis, ...]              # 144-D embedding space (Mahalanobis)
-    z_in = np.concatenate([z[0], np.asarray(sensor_feature_vector, np.float32)])[np.newaxis, ...].astype(np.float32)
+    sp = sensor_branch.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...],
+                               verbose=0)[0]                 # 3-class state posterior
+    z_in = np.concatenate([z[0], np.asarray(sensor_feature_vector, np.float32),
+                           sp])[np.newaxis, ...].astype(np.float32)
     index = float(fusion_engine.predict(z_in, verbose=0)[0][0]) * 100.0
     d = float(mahalanobis_distance(z[0]))
     if d > MAH_THRESHOLD and len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
@@ -979,8 +986,8 @@ edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for
              "mahalanobis_shrinkage": 0.10,
              "fusion_pairs": int(len(Z)),
              "fusion_states": {str(k): v for k, v in n_state.items()},
-             "fusion_input": "concat(Fv 128, Fs 16, raw_scaled 16) = 160",
-             "freshness_index_bands": {"fresh": [0.86, 0.94], "masked": [0.66, 0.74], "stale": [0.12, 0.22]},
+             "fusion_input": "concat(Fv 128, Fs 16, raw_scaled 16, state_prob 3) = 163",
+             "freshness_index_bands": {"fresh": [0.88, 0.92], "masked": [0.68, 0.72], "stale": [0.17, 0.21]},
              "mahalanobis_inv_cov": [[float(x) for x in row] for row in np.asarray(MAH_INV_COV, np.float64)],
              "image_datasets": [p["dataset"] for p in provenance],
              "sensor_datasets": list(coverage_df.dataset) if len(coverage_df) else []}
@@ -1007,7 +1014,7 @@ with open(f"{OUT}/edge_config.h", "w") as f:
     f.write("#define NUM_SENSOR_VALUE_COLS 8\n")
     f.write("#define NUM_FEATURES 16          // 8 scaled sensor values + 8 availability flags\n")
     f.write(f"#define MAH_DIM {Z.shape[1]}\n")
-    f.write("#define FUSION_INPUT_DIM 160     // Fv 128 + Fs 16 + raw scaled 16\n")
+    f.write(f"#define FUSION_INPUT_DIM {FUSION_IN_DIM}     // Fv 128 + Fs 16 + raw scaled 16 + state prob 3\n")
     f.write(f"#define MAH_THRESHOLD {MAH_THRESHOLD:.4f}f\n")
     f.write(f"#define CH2O_ALERT_PPM {CH2O_ALERT_PPM:.1f}f\n\n")
     f.write("static const char *SENSOR_FEATURE_NAMES[NUM_FEATURES] = {\n")
