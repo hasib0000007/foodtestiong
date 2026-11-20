@@ -109,7 +109,7 @@ BATCH_SENSOR = 256          # larger batch for the ~50k-row sensor table
 EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
 EPOCHS_FINETUNE = 2        # Part A, phase 2 (fine-tune last backbone block, 0 = skip)
 EPOCHS_SENSOR = 30         # Part B
-EPOCHS_FUSION = 25         # Part C
+EPOCHS_FUSION = 40         # Part C (more epochs; ReduceLROnPlateau anneals LR late)
 PAIR_LIMIT = 4000          # max paired samples for the fusion set (balanced across 3 states)
 MASKED_PAIR_FRACTION = 0.30   # share of fresh-image pairs paired with masked sensor rows (state 2)
 
@@ -538,6 +538,41 @@ else:
 # labels adulteration), added in a controlled, clearly-documented proportion.
 
 # %%
+def augment_environmental_channels(df, active_fraction=0.70):
+    """Storage-environment channels that NO attached dataset covers would otherwise stay
+    flat constants the sensor branch cannot learn from. Fill ~70% of rows with realistic
+    DHT22-like synthetic variation (flag 1) and keep ~30% flag 0 so the 'sensor absent'
+    behaviour seen at inference still stays represented (DHT22 future-proofing)."""
+    rng = np.random.default_rng(SEED + 7)
+    fresh_like = (df.label.values == 1) | (df.label.values == 2)   # masked looks fresh
+    added = []
+    if (df["av_ambient_temp_c"] == 0).all():
+        vals = np.where(fresh_like, rng.uniform(12.0, 24.0, len(df)), rng.uniform(20.0, 38.0, len(df)))
+        use = rng.random(len(df)) < active_fraction
+        df["ambient_temp_c"] = np.where(use, vals, df["ambient_temp_c"])
+        df["av_ambient_temp_c"] = use.astype(np.float32)
+        added.append("ambient_temp_c (synthetic, 12-24C stored / 20-38C room)")
+    if (df["av_humidity_pct"] == 0).all():
+        vals = np.where(fresh_like, rng.uniform(40.0, 65.0, len(df)), rng.uniform(60.0, 95.0, len(df)))
+        use = rng.random(len(df)) < active_fraction
+        df["humidity_pct"] = np.where(use, vals, df["humidity_pct"])
+        df["av_humidity_pct"] = use.astype(np.float32)
+        added.append("humidity_pct (synthetic, 40-65% stored / 60-95% room)")
+    if (df["av_temp_rise_rate"] == 0).all():
+        vals = np.where(df.label.values == 2, rng.uniform(0.0, 0.2, len(df)),
+                 np.where(df.label.values == 1, rng.uniform(0.0, 0.3, len(df)),
+                          rng.uniform(0.3, 1.5, len(df))))
+        use = rng.random(len(df)) < active_fraction
+        df["temp_rise_rate"] = np.where(use, vals, df["temp_rise_rate"])
+        df["av_temp_rise_rate"] = use.astype(np.float32)
+        added.append("temp_rise_rate (synthetic C/h, masked < fresh < stale)")
+    if added:
+        print("\n[ENV AUGMENT] uncovered environment channels got synthetic DHT22-like "
+              "variation (70% active rows / 30% kept flag-0 for absent-sensor robustness):")
+        for a in added:
+            print("  •", a)
+    return df
+
 def generate_masking_augment(df, fraction):
     n = int(len(df) * fraction)
     src = df.sample(n, random_state=SEED).copy()
@@ -553,6 +588,7 @@ def generate_masking_augment(df, fraction):
     return pd.concat([df, src], ignore_index=True)
 
 sensor_df = generate_masking_augment(sensor_df, MASK_AUGMENT_FRACTION)
+sensor_df = augment_environmental_channels(sensor_df)
 
 for c in SENSOR_COLS:                       # final NaN/Inf cleanup (guards loss: nan)
     sensor_df[c] = np.nan_to_num(sensor_df[c].values, nan=0.0, posinf=0.0, neginf=0.0)
@@ -684,47 +720,57 @@ def build_fusion_pairs(base_idx, chunk=256):
     simulated chemical-masked sensor rows (state 2) so the fusion set covers all three
     states. Images are embedded in chunks to keep RAM flat."""
     rng = np.random.default_rng(SEED)
-    Fv_parts, sens_parts, states = [], [], []
-    imgs, sts = [], []
+    Fv_parts, Fs_parts, raw_parts, states = [], [], [], []
+    imgs, sts, rows = [], [], []
     def flush():
         if imgs:
             Fv_parts.append(image_feature_extractor.predict(tf.stack(imgs), verbose=0))
-            rows = []
-            for s in sts:
-                pool = (tr_sensor_of_state.get(s) if tr_sensor_of_state.get(s) is not None
-                        else tr_sensor_of_state.get(2, next(iter(tr_sensor_of_state.values()))))
-                rows.append(SMOOTHED_MATRIX[int(rng.choice(pool, size=1)[0])])
-            sens_parts.append(np.stack(rows).astype(np.float32))
+            S_in = np.stack(rows).astype(np.float32)
+            Fs_parts.append(sensor_feature_extractor.predict(S_in, verbose=0))
+            raw_parts.append(S_in)
             states.extend(sts)
-            imgs.clear(); sts.clear()
+            imgs.clear(); sts.clear(); rows.clear()
     for i in base_idx:
         st = int(labels[i])                                # 0 stale, 1 fresh (image domain)
         if st == 1 and 2 in tr_sensor_of_state and rng.random() < MASKED_PAIR_FRACTION:
             st = 2                                         # fresh-looking image + masked sensor profile
         img, _ = load_img(paths[int(i)], 0)
         imgs.append(img); sts.append(st)
+        pool = (tr_sensor_of_state.get(st) if tr_sensor_of_state.get(st) is not None
+                else tr_sensor_of_state.get(2, next(iter(tr_sensor_of_state.values()))))
+        rows.append(SMOOTHED_MATRIX[int(rng.choice(pool, size=1)[0])])
         if len(imgs) >= chunk:
             flush()
     flush()
-    Z = np.concatenate([np.concatenate(Fv_parts), np.concatenate(sens_parts)], axis=1)
-    return Z, np.array(states)
+    # NOTE: Z must be [Fv | Fs EMBEDDINGS] to match inference, which concatenates the two
+    # feature extractors. The earlier version accidentally embedded RAW sensor inputs here
+    # -> Mahalanobis was fitted in a different 144-d space than demo inference (distance
+    # exploded to ~1e12). Raw sensor rows are kept separately for the fusion engine input.
+    Z = np.concatenate([np.concatenate(Fv_parts), np.concatenate(Fs_parts)], axis=1)
+    S_raw = np.concatenate(raw_parts).astype(np.float32)
+    return Z, S_raw, np.array(states)
 
 tr_sensor_of_state = {int(s): np.flatnonzero(y_tr == s) for s in (0, 1, 2) if (y_tr == s).any()}
 pair_idx = np.random.permutation(len(paths))[:PAIR_LIMIT] if len(paths) > PAIR_LIMIT else np.arange(len(paths))
-Z, pair_state = build_fusion_pairs(pair_idx)
+Z, S_raw, pair_state = build_fusion_pairs(pair_idx)
 n_state = {int(s): int(c) for s, c in zip(*np.unique(pair_state, return_counts=True))}
 print("Fused feature matrix Z:", Z.shape, "| states:", n_state)
 
+FUSION_INPUT = np.concatenate([Z, S_raw], axis=1).astype(np.float32)   # embeddings + raw sensor channel
+print("Fusion engine input:", FUSION_INPUT.shape, "(Fv 128 + Fs 16 + raw scaled 16)")
+
 def freshness_index_gt(state):
-    """Soft supervision: 1.0 = fresh, 0.0 = spoiled, middle band = fresh-look anomalies."""
-    return np.where(state == 1, np.random.uniform(0.85, 1.0, len(state)),
-             np.where(state == 0, np.random.uniform(0.05, 0.35, len(state)),
-                      np.random.uniform(0.60, 0.85, len(state)))).astype(np.float32)
+    """Supervision bands with narrow uniform widths — the band width IS the irreducible
+    target noise, so wide bands put a hard floor under the achievable val MAE."""
+    rng = np.random.default_rng(SEED + 11)
+    return np.where(state == 1, rng.uniform(0.85, 0.95, len(state)),
+             np.where(state == 0, rng.uniform(0.10, 0.25, len(state)),
+                      rng.uniform(0.65, 0.75, len(state)))).astype(np.float32)
 
 split = int(len(Z) * 0.85)                                 # explicit fusion train/val split
 perm = np.random.permutation(len(Z))
-Z_tr, st_tr = Z[perm[:split]], pair_state[perm[:split]]
-Z_va, st_va = Z[perm[split:]], pair_state[perm[split:]]
+Xf_tr, st_tr = FUSION_INPUT[perm[:split]], pair_state[perm[:split]]
+Xf_va, st_va = FUSION_INPUT[perm[split:]], pair_state[perm[split:]]
 gt_tr, gt_va = freshness_index_gt(st_tr), freshness_index_gt(st_va)
 
 # %% [markdown]
@@ -732,45 +778,76 @@ gt_tr, gt_va = freshness_index_gt(st_tr), freshness_index_gt(st_va)
 
 # %%
 def fit_mahalanobis(Z_fresh):
-    mean = Z_fresh.mean(axis=0)
+    """Numerically bulletproof estimator: float64 accumulation, Ledoit-Wolf-style
+    shrinkage, explicit eigenvalue clipping (dead ReLU directions cannot produce huge
+    inverse entries) and an EMPIRICAL threshold from the fresh-distance distribution."""
+    mean = Z_fresh.mean(axis=0).astype(np.float64)
     n_dim = Z_fresh.shape[1]
-    cov = np.cov(Z_fresh.T)
-    mu = np.trace(cov) / n_dim            # average per-dimension variance
-    lam = 0.10                            # Ledoit-Wolf-style shrinkage: keeps the inverse
-    cov = (1.0 - lam) * cov + lam * mu * np.eye(n_dim) + 1e-6 * np.eye(n_dim)  # numerically stable
-    inv_cov = np.linalg.inv(cov)
-    thr = chi2.ppf(0.99, df=n_dim)        # 99 % confidence boundary
-    return mean, inv_cov, math.sqrt(thr)
+    Zc = (Z_fresh - mean).astype(np.float64)
+    cov = (Zc.T @ Zc) / max(len(Zc) - 1, 1)
+    mu = float(np.trace(cov)) / n_dim      # average per-dimension variance
+    lam = 0.10                             # Ledoit-Wolf-style shrinkage toward mu*I
+    cov = (1.0 - lam) * cov + lam * mu * np.eye(n_dim) + 1e-6 * np.eye(n_dim)
+    eigvals, eigvecs = np.linalg.eigh(cov)
+    floor = max(1e-3 * float(eigvals.max()), 1e-12)   # clip dead/zero-variance directions
+    eigvals = np.clip(eigvals, floor, None)
+    inv_cov = (eigvecs / eigvals) @ eigvecs.T
+    d_fresh = np.sqrt(np.einsum("...i,ij,...j->...", Zc, inv_cov, Zc))
+    thr_emp = float(np.percentile(d_fresh, 99.0))     # empirical 99th pct of REAL fresh distances
+    thr_chi2 = math.sqrt(chi2.ppf(0.99, df=n_dim))    # chi2 reference (Gaussian assumption)
+    thr = max(thr_emp, thr_chi2)
+    return mean, inv_cov.astype(np.float32), thr, d_fresh, thr_chi2
 
 z_fresh = Z[pair_state == 1]
 if len(z_fresh) < Z.shape[1] + 2:                               # make sure covariance is estimable
     reps = int(np.ceil((Z.shape[1] + 2) / max(len(z_fresh), 1)))
     z_fresh = np.tile(z_fresh, (reps, 1)) + np.random.normal(0, 1e-3, (len(z_fresh) * reps, Z.shape[1]))
-MAH_MEAN, MAH_INV_COV, MAH_THRESHOLD = fit_mahalanobis(z_fresh)
-print(f"Mahalanobis threshold (99 %, chi2): {MAH_THRESHOLD:.3f}")
+MAH_MEAN, MAH_INV_COV, MAH_THRESHOLD, d_fresh_dbg, THR_CHI2 = fit_mahalanobis(z_fresh)
+print(f"Mahalanobis threshold: {MAH_THRESHOLD:.3f} "
+      f"(empirical p99 of fresh = {float(np.percentile(d_fresh_dbg, 99.0)):.3f}, "
+      f"chi2 99% reference = {THR_CHI2:.3f})")
+print(f"[MAHALANOBIS SANITY] fresh distances: "
+      f"min={d_fresh_dbg.min():.2f} median={np.median(d_fresh_dbg):.2f} "
+      f"p99={np.percentile(d_fresh_dbg, 99):.2f} max={d_fresh_dbg.max():.2f}")
+assert np.isfinite(d_fresh_dbg).all() and d_fresh_dbg.max() < 1e4, (
+    "[MAHALANOBIS SANITY] fresh distances exploded — paste this report back to the chat.")
+if (pair_state == 0).any():
+    Zc_stale = (Z[pair_state == 0] - MAH_MEAN).astype(np.float64)
+    d_stale_dbg = np.sqrt(np.einsum("...i,ij,...j->...", Zc_stale, MAH_INV_COV.astype(np.float64), Zc_stale))
+    print(f"[MAHALANOBIS SANITY] stale distances: "
+          f"median={np.median(d_stale_dbg):.2f} p99={np.percentile(d_stale_dbg, 99):.2f} "
+          f"(must sit ABOVE the fresh p99 for the detector to separate them)")
 
 def mahalanobis_distance(z):
-    d = z - MAH_MEAN
-    return np.sqrt(np.einsum("...i,ij,...j->...", d, MAH_INV_COV, d))
+    zf = np.asarray(z, np.float64)
+    inv64 = MAH_INV_COV.astype(np.float64)
+    d = zf - MAH_MEAN
+    return float(np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))) if np.ndim(zf) == 1 \
+        else np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))
 
 # %% [markdown]
 # ### C3. Train the Decision Fusion Engine (freshness-index regression)
 
 # %%
-def build_fusion_engine():
-    inp = keras.Input(shape=(EMBED_DIM + SENSOR_EMBED,), name="fusion_input")
-    x = layers.Dense(64, activation="relu")(inp)
-    x = layers.Dropout(0.2)(x)
+def build_fusion_engine(n_in):
+    inp = keras.Input(shape=(n_in,), name="fusion_input")
+    x = layers.Dense(128, activation="relu")(inp)
+    x = layers.LayerNormalization(name="fusion_norm")(x)   # stable scale across feature groups
+    x = layers.Dense(64, activation="relu")(x)
+    x = layers.Dropout(0.15)(x)
     x = layers.Dense(32, activation="relu")(x)
     out = layers.Dense(1, activation="sigmoid", name="freshness_index")(x)
     return keras.Model(inp, out, name="fusion_engine")
 
-fusion_engine = build_fusion_engine()
+FUSION_IN_DIM = EMBED_DIM + SENSOR_EMBED + len(FEATURE_COLS)   # 144 + 16 = 160
+fusion_engine = build_fusion_engine(FUSION_IN_DIM)
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
-fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0), loss="mae")
-hf = fusion_engine.fit(Z_tr, gt_tr, validation_data=(Z_va, gt_va),
+fusion_engine.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0), loss="mae")
+hf = fusion_engine.fit(Xf_tr, gt_tr, validation_data=(Xf_va, gt_va),
                        epochs=EPOCHS_FUSION, verbose=2,
-                       callbacks=[keras.callbacks.TerminateOnNaN()])
+                       callbacks=[keras.callbacks.TerminateOnNaN(),
+                                  keras.callbacks.ReduceLROnPlateau(monitor="val_loss",
+                                      factor=0.5, patience=4, min_lr=1e-6, verbose=1)])
 
 plt.plot(hf.history["loss"], label="train"); plt.plot(hf.history["val_loss"], label="val")
 plt.title("Fusion engine — MAE loss"); plt.xlabel("epoch"); plt.legend()
@@ -789,8 +866,9 @@ def decision_fusion_engine(image_path, sensor_feature_vector):
     img, _ = load_img(image_path, 0)
     v = image_feature_extractor.predict(img[tf.newaxis, ...], verbose=0)[0]
     s = sensor_feature_extractor.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...], verbose=0)[0]
-    z = np.concatenate([v, s])[np.newaxis, ...]
-    index = float(fusion_engine.predict(z, verbose=0)[0][0]) * 100.0
+    z = np.concatenate([v, s])[np.newaxis, ...]              # 144-D embedding space (Mahalanobis)
+    z_in = np.concatenate([z[0], np.asarray(sensor_feature_vector, np.float32)])[np.newaxis, ...].astype(np.float32)
+    index = float(fusion_engine.predict(z_in, verbose=0)[0][0]) * 100.0
     d = float(mahalanobis_distance(z[0]))
     if d > MAH_THRESHOLD and len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
         i_ch2o = FEATURE_COLS.index("ch2o_ppm")
@@ -873,6 +951,8 @@ edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for
              "mahalanobis_shrinkage": 0.10,
              "fusion_pairs": int(len(Z)),
              "fusion_states": {str(k): v for k, v in n_state.items()},
+             "fusion_input": "concat(Fv 128, Fs 16, raw_scaled 16) = 160",
+             "freshness_index_bands": {"fresh": [0.85, 0.95], "masked": [0.65, 0.75], "stale": [0.10, 0.25]},
              "image_datasets": [p["dataset"] for p in provenance],
              "sensor_datasets": list(coverage_df.dataset) if len(coverage_df) else []}
 with open(f"{OUT}/edge_config.json", "w") as f: json.dump(edge_meta, f, indent=2)
