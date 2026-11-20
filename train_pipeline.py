@@ -166,7 +166,8 @@ SENSOR_CSVS = [
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
     # --- 4th gap-filler: IoT Agriculture 2024 (wisam1985) — closes ambient_temp_c/humidity_pct ---
-    # verified columns: date, temperature, humidity, water_level, N, P, K
+    # IoTProcessed_Data.csv ships the temperature column as 'tempreature' (sic) —
+    # resolved by COLUMN_ALIASES above; humidity is spelled correctly.
     # greenhouse IoT telemetry; no food-freshness ground truth, so it contributes
     # REAL environment channels only ('constant' label rows keep part of B stale-side).
     # alternative: any DHT22/DHT11 CSV — map its columns the same way.
@@ -409,6 +410,23 @@ def resolve_label(rule, df, fname):
         return np.full(len(df), 1 if day in rule["fresh_days"] else 0)
     return np.zeros(len(df), dtype=int)   # "constant"
 
+# dataset authors misspell columns (e.g. IoT Agriculture 2024 ships 'tempreature');
+# the alias table lets the canonical mapping resolve them instead of silently dropping
+# the channel into imputation.
+COLUMN_ALIASES = {
+    "temperature": ["tempreature", "temp", "temp_c", "temperature(c)", "temperature(c)"],
+    "humidity":    ["humidity_pct", "humid", "relative_humidity", "rh", "humidity(%)"],
+}
+
+def _resolve_col(df, want):
+    w = want.strip().lower()
+    if w in df.columns:
+        return w
+    for alias in COLUMN_ALIASES.get(w, []):
+        if alias in df.columns:
+            return alias
+    return None
+
 def load_sensor_datasets(cfgs):
     frames, coverage = {}, []
     for cfg in cfgs:
@@ -426,8 +444,9 @@ def load_sensor_datasets(cfgs):
             df.columns = [c.strip().lower() for c in df.columns]
             row = {}
             for canon, raw in cfg["mapping"].items():
-                row[canon] = pd.to_numeric(df[raw.strip().lower()], errors="coerce") if raw \
-                             and raw.strip().lower() in df.columns else np.full(len(df), np.nan)
+                src_col = _resolve_col(df, raw) if raw else None
+                row[canon] = pd.to_numeric(df[src_col], errors="coerce") if src_col \
+                             else np.full(len(df), np.nan)
             sub = pd.DataFrame(row)
             for canon, mul in cfg.get("scale", {}).items():  # unit harmonization (e.g. days -> hours)
                 sub[canon] = sub[canon] * mul
@@ -763,9 +782,9 @@ def freshness_index_gt(state):
     """Supervision bands with narrow uniform widths — the band width IS the irreducible
     target noise, so wide bands put a hard floor under the achievable val MAE."""
     rng = np.random.default_rng(SEED + 11)
-    return np.where(state == 1, rng.uniform(0.85, 0.95, len(state)),
-             np.where(state == 0, rng.uniform(0.10, 0.25, len(state)),
-                      rng.uniform(0.65, 0.75, len(state)))).astype(np.float32)
+    return np.where(state == 1, rng.uniform(0.86, 0.94, len(state)),
+             np.where(state == 0, rng.uniform(0.12, 0.22, len(state)),
+                      rng.uniform(0.66, 0.74, len(state)))).astype(np.float32)
 
 split = int(len(Z) * 0.85)                                 # explicit fusion train/val split
 perm = np.random.permutation(len(Z))
@@ -842,7 +861,8 @@ def build_fusion_engine(n_in):
 FUSION_IN_DIM = EMBED_DIM + SENSOR_EMBED + len(FEATURE_COLS)   # 144 + 16 = 160
 fusion_engine = build_fusion_engine(FUSION_IN_DIM)
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
-fusion_engine.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0), loss="mae")
+fusion_engine.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0),
+                      loss=keras.losses.Huber(delta=0.1), metrics=["mae"])
 hf = fusion_engine.fit(Xf_tr, gt_tr, validation_data=(Xf_va, gt_va),
                        epochs=EPOCHS_FUSION, verbose=2,
                        callbacks=[keras.callbacks.TerminateOnNaN(),
@@ -933,10 +953,12 @@ try:
     with open(f"{OUT}/image_branch_int8.tflite", "wb") as f: f.write(tfl)
     with open(f"{OUT}/image_branch.cc", "w") as f:
         f.write("const unsigned char g_image_branch[] = {" + ",".join(str(b) for b in tfl) + "};\n")
-    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)
-    conv.optimizations = [tf.lite.Optimize.DEFAULT]
-    with open(f"{OUT}/fusion_engine_dyn.tflite", "wb") as f: f.write(conv.convert())
-    print("TFLite INT8 export OK")
+    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)   # float32 — TFLM-safe
+    f32 = conv.convert()
+    with open(f"{OUT}/fusion_engine_f32.tflite", "wb") as f: f.write(f32)
+    with open(f"{OUT}/fusion_engine.cc", "w") as f:
+        f.write("const unsigned char g_fusion_engine[] = {" + ",".join(str(b) for b in f32) + "};\n")
+    print("TFLite INT8 (image) + Float32 (fusion) export OK")
 except Exception as e:
     print("INT8 export fallback:", e)
     conv = tf.lite.TFLiteConverter.from_keras_model(image_branch)
@@ -952,10 +974,44 @@ edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for
              "fusion_pairs": int(len(Z)),
              "fusion_states": {str(k): v for k, v in n_state.items()},
              "fusion_input": "concat(Fv 128, Fs 16, raw_scaled 16) = 160",
-             "freshness_index_bands": {"fresh": [0.85, 0.95], "masked": [0.65, 0.75], "stale": [0.10, 0.25]},
+             "freshness_index_bands": {"fresh": [0.86, 0.94], "masked": [0.66, 0.74], "stale": [0.12, 0.22]},
+             "mahalanobis_inv_cov": [[float(x) for x in row] for row in np.asarray(MAH_INV_COV, np.float64)],
              "image_datasets": [p["dataset"] for p in provenance],
              "sensor_datasets": list(coverage_df.dataset) if len(coverage_df) else []}
 with open(f"{OUT}/edge_config.json", "w") as f: json.dump(edge_meta, f, indent=2)
+
+# ---- ESP32-S3 firmware header: scaling bounds + Mahalanobis detector as C arrays ----
+def _cpp_array_1d(name, arr, per_line=8):
+    vals = [f"{float(v):.8e}f" for v in np.asarray(arr, np.float64).ravel()]
+    lines = [", ".join(vals[i:i + per_line]) for i in range(0, len(vals), per_line)]
+    return f"const float {name}[{len(vals)}] = {{\n  " + ",\n  ".join(lines) + "\n}};"
+
+def _cpp_array_2d(name, mat):
+    rows = []
+    for r in np.asarray(mat, np.float64):
+        rows.append("{" + ",".join(f"{float(v):.8e}f" for v in r) + "}")
+    n = len(rows)
+    return f"const float {name}[{n}][{n}] = {{\n  " + ",\n  ".join(rows) + "\n}};"
+
+with open(f"{OUT}/edge_config.h", "w") as f:
+    f.write("#ifndef EDGE_CONFIG_H\n#define EDGE_CONFIG_H\n\n")
+    f.write("// Auto-generated by train_pipeline.py — do not edit by hand.\n")
+    f.write(f"// Mahalanobis: mean + shrunk inverse covariance of the FRESH class in the "
+            f"144-d fused embedding space [Fv 128 | Fs 16].\n\n")
+    f.write("#define NUM_SENSOR_VALUE_COLS 8\n")
+    f.write("#define NUM_FEATURES 16          // 8 scaled sensor values + 8 availability flags\n")
+    f.write(f"#define MAH_DIM {Z.shape[1]}\n")
+    f.write("#define FUSION_INPUT_DIM 160     // Fv 128 + Fs 16 + raw scaled 16\n")
+    f.write(f"#define MAH_THRESHOLD {MAH_THRESHOLD:.4f}f\n")
+    f.write(f"#define CH2O_ALERT_PPM {CH2O_ALERT_PPM:.1f}f\n\n")
+    f.write("static const char *SENSOR_FEATURE_NAMES[NUM_FEATURES] = {\n")
+    f.write("  " + ",\n  ".join(f'"{c}"' for c in FEATURE_COLS) + "\n};\n\n")
+    f.write(_cpp_array_1d("SENSOR_MIN", [bounds[c][0] for c in SENSOR_COLS]) + "\n\n")
+    f.write(_cpp_array_1d("SENSOR_MAX", [bounds[c][1] for c in SENSOR_COLS]) + "\n\n")
+    f.write(_cpp_array_1d("MAH_MEAN", MAH_MEAN) + "\n\n")
+    f.write(_cpp_array_2d("MAH_INV_COV", MAH_INV_COV) + "\n\n")
+    f.write("#endif\n")
+print("edge_config.h generated for ESP32-S3 firmware (bounds + threshold + mean + 144x144 inv covariance)")
 
 print("\nArtifacts in", OUT, ":")
 for f in sorted(glob.glob(f"{OUT}/*")):
