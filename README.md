@@ -97,3 +97,23 @@ adulteration augmentation over public sensor telemetry*.
 - Mahalanobis covariance ridge-regularized (+1e-4·I); threshold = χ² 99 % quantile,
   df = 144.
 - Image scaling [0,255]→[0,1] per proposal; internal rescaling maps to ImageNet range.
+
+## Thesis Report (generated)
+
+`Thesis_Report_0242310005341469.docx` is the complete Bachelor thesis report,
+rebuilt from this repository's pipeline outputs by `build_thesis_final.py`.
+It follows the DIU Thesis Guidelines and SWE Thesis Template 2024:
+
+- A4, margins: left 4.0 cm, top/bottom/right 2.5 cm; Times New Roman 12 pt
+- Double-spaced body text; single-spaced tables, captions, and references
+- Preliminaries in Roman numerals (title page number unprinted), body in Arabic
+- Exact page order: cover -> declaration & copyright -> supervisor's declaration
+  -> student's declaration -> title/submission page -> acknowledgements ->
+  dedication -> abstract -> table of contents -> lists of tables/figures/
+  symbols/abbreviations/appendices -> Chapters 1-5 -> references -> appendices
+- All figures (training curves, confusion matrix, correlation heatmap,
+  adulteration boundary, fusion convergence) and the dataset coverage CSV are
+  integrated with chapter-wise captions (table captions above, figure captions
+  below)
+- Open the file in Word and press Ctrl+A, F9 once to populate the Table of
+  Contents and the Lists of Tables/Figures from the embedded caption styles.
