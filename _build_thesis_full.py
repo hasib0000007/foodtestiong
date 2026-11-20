@@ -47,12 +47,12 @@ def _set_pg_format(s, fmt, start):
     s._sectPr.append(pg)
 
 def _page_field(paragraph):
-    r = paragraph.add_run()
-    f1 = OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"), "begin")
-    f2 = OxmlElement("w:instrText"); f2.set(qn("xml:space"), "preserve"); f2.text = " PAGE "
-    f3 = OxmlElement("w:fldChar"); f3.set(qn("w:fldCharType"), "end")
-    r._r.append(f1); r._r.append(f2); r._r.append(f3)
-    r.font.name = "Times New Roman"; r.font.size = Pt(12)
+    r1, r2, r3 = paragraph.add_run(), paragraph.add_run(), paragraph.add_run()
+    f1 = OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"), "begin"); r1._r.append(f1)
+    f2 = OxmlElement("w:instrText"); f2.set(qn("xml:space"), "preserve"); f2.text = " PAGE "; r2._r.append(f2)
+    f3 = OxmlElement("w:fldChar"); f3.set(qn("w:fldCharType"), "end"); r3._r.append(f3)
+    for r in (r1, r2, r3):
+        r.font.name = "Times New Roman"; r.font.size = Pt(12)
 
 def new_section(numbering):
     s = doc.add_section(WD_SECTION.NEW_PAGE)
@@ -110,6 +110,7 @@ def TBL(caption, headers, rows, font_size=10):
     cap.alignment = C
     cap.paragraph_format.line_spacing = 1.0
     cap.paragraph_format.space_before = Pt(10); cap.paragraph_format.space_after = Pt(4)
+    cap.style = doc.styles["Caption Table"]
     r = cap.add_run(caption); r.bold = True; r.font.size = Pt(11); r.font.name = "Times New Roman"
     t = doc.add_table(rows=1 + len(rows), cols=len(headers))
     t.style = "Table Grid"
@@ -144,7 +145,36 @@ def FIG(path, caption, width_in=5.8, placeholder=None):
     cap.alignment = C
     cap.paragraph_format.line_spacing = 1.0
     cap.paragraph_format.space_after = Pt(14)
+    cap.style = doc.styles["Caption Figure"]
     r = cap.add_run(caption); r.italic = True; r.font.size = Pt(11); r.font.name = "Times New Roman"
+    return para
+
+from docx.enum.style import WD_STYLE_TYPE
+_style_t = doc.styles.add_style("Caption Table", WD_STYLE_TYPE.PARAGRAPH)
+_style_t.base_style = doc.styles["Normal"]
+_style_f = doc.styles.add_style("Caption Figure", WD_STYLE_TYPE.PARAGRAPH)
+_style_f.base_style = doc.styles["Normal"]
+
+def TOCFIELD(instr, note="Right-click here and choose Update Field (F9) to populate this list."):
+    para = doc.add_paragraph()
+    r1 = para.add_run()
+    f1 = OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"), "begin"); r1._r.append(f1)
+    r2 = para.add_run()
+    it = OxmlElement("w:instrText"); it.set(qn("xml:space"), "preserve"); it.text = instr; r2._r.append(it)
+    r3 = para.add_run()
+    f2 = OxmlElement("w:fldChar"); f2.set(qn("w:fldCharType"), "separate"); r3._r.append(f2)
+    r4 = para.add_run(note)
+    r5 = para.add_run()
+    f3 = OxmlElement("w:fldChar"); f3.set(qn("w:fldCharType"), "end"); r5._r.append(f3)
+    return para
+
+ASSET_DIR = os.path.join(BASE, "_assets")
+
+def LOGO(path, width_in=1.2):
+    para = doc.add_paragraph()
+    para.alignment = C
+    para.paragraph_format.line_spacing = 1.0
+    para.add_run().add_picture(os.path.join(ASSET_DIR, path), width=Inches(width_in))
     return para
 
 def PH(text):
@@ -232,7 +262,7 @@ PH("[THESIS DECLARATION LETTER (RESTRICTED case only) is OPTIONAL and not applic
 PB()
 
 # ---- Supervisor's Declaration ----
-P("[DIU LOGO]", align=C, spacing=1.0, placeholder=True)
+LOGO("diu_logo.png", 1.2)
 P("SUPERVISOR'S DECLARATION", align=C, bold=True, spacing=1.0, size=14)
 NL()
 P("I hereby declare that I have checked this thesis and in my opinion, this thesis is adequate in terms of scope and quality for the award of the degree of Bachelor of Science.")
@@ -244,6 +274,7 @@ P("Date :", spacing=1.0)
 PB()
 
 # ---- Student's Declaration ----
+LOGO("diu_logo.png", 1.2)
 P("STUDENT'S DECLARATION", align=C, bold=True, spacing=1.0, size=14)
 NL()
 P("I hereby declare that the work in this thesis is based on my original work except for quotations and citations which have been duly acknowledged. I also declare that it has not been previously or concurrently submitted for any other degree at Daffodil International University or any other institution.")
@@ -300,44 +331,17 @@ PB()
 # ---- Table of Content ----
 P("TABLE OF CONTENT", align=C, bold=True, spacing=1.0, size=14)
 NL()
-PH("[Automatic Table of Contents \u2014 in Word: References tab \u2192 Table of Contents \u2192 Automatic Table 2; page numbers refresh with F9 or right-click \u2192 Update Field. Heading styles 1\u20132 are already applied throughout this document, so every chapter and section will populate.]")
+TOCFIELD('TOC \\o "1-2" \\h \\z \\u', "Right-click and Update Field (F9) to build the Table of Contents.")
 PB()
 
 # ---- List of Tables ----
 P("LIST OF TABLES", align=C, bold=True, spacing=1.0, size=14)
-TBL("Tables",
-    ["No.", "Caption", "Location"],
-    [["Table 1.1", "Summary of thesis objectives and their mapping to system components", "1"],
-     ["Table 2.1", "Functional-requirement coverage by existing literature streams", "12"],
-     ["Table 3.1", "Public Kaggle image datasets: composition and class balance", "16"],
-     ["Table 3.2", "Public Kaggle sensor datasets: row counts, mapped channels, and label rules", "17"],
-     ["Table 3.3", "Canonical 16-channel sensor feature vector", "18"],
-     ["Table 3.4", "Freshness Index supervision bands by sensor state", "19"],
-     ["Table 4.1", "Sensor dataset channel coverage matrix", "22"],
-     ["Table 4.2", "Image branch training trajectory (two phases)", "23"],
-     ["Table 4.3", "Image branch validation performance summary", "24"],
-     ["Table 4.4", "Sensor branch per-channel input statistics and training trajectory", "25"],
-     ["Table 4.5", "Sensor branch per-class classification report", "27"],
-     ["Table 4.6", "Fusion engine dataset composition and 163-D input construction", "29"],
-     ["Table 4.7", "Fusion engine training trajectory", "30"],
-     ["Table 4.8", "Mahalanobis-distance population separation", "32"],
-     ["Table 4.9", "End-to-end integrated demonstration result", "33"],
-     ["Table 4.10", "Generated deployment artifacts with sizes", "34"],
-     ["Table 4.11", "Consolidated final results across the four system layers", "35"]], font_size=9)
+TOCFIELD('TOC \\h \\z \\t "Caption Table,1"', "Right-click and Update Field (F9) to build the List of Tables.")
 PB()
 
 # ---- List of Figures ----
 P("LIST OF FIGURES", align=C, bold=True, spacing=1.0, size=14)
-TBL("Figures",
-    ["No.", "Caption", "Location"],
-    [["Figure 3.1", "Proposed tri-layer system architecture", "15"],
-     ["Figure 3.2", "Data-flow of the fusion feature vector construction (163-D)", "15"],
-     ["Figure 4.1", "Image branch training curves (head training and fine-tuning phases)", "24"],
-     ["Figure 4.2", "Sensor branch training curves (30 epochs)", "26"],
-     ["Figure 4.3", "Sensor branch confusion matrix (172,954 validation rows)", "28"],
-     ["Figure 4.4", "Fusion engine training curves (40 epochs)", "31"],
-     ["Figure 4.5", "Mahalanobis-distance decision boundary between fresh and stale populations", "32"],
-     ["Figure 4.6", "Correlation structure of the canonical sensor feature channels", "29"]], font_size=9)
+TOCFIELD('TOC \\h \\z \\t "Caption Figure,1"', "Right-click and Update Field (F9) to build the List of Figures.")
 PB()
 
 # ---- List of Symbols ----
@@ -538,10 +542,10 @@ H2("3.1 Overview of the Proposed System")
 P("The proposed system is organized as a tri-layer multimodal pipeline with a fourth, purely statistical consistency layer. One food sample is observed through two independent evidence channels: a camera image and a heterogeneous, possibly incomplete sensor vector. The pipeline proceeds in three learned stages and one statistical stage: (1) the image branch transforms the image into a compact visual embedding Fv \u2208 R^128 and a binary fresh/stale decision; (2) the sensor branch transforms the canonical 16-feature sensor vector into a sensor embedding Fs \u2208 R^16 and a three-class freshness state posterior p(y | x_s) over Fresh, Stale, and chemically Masked states; (3) the fusion engine regresses a continuous 0\u2013100 Freshness Index from the concatenation")
 EQ("u = [ Fv(128) | Fs(16) | x_s(16) | p(3) ] \u2208 R^163", "3.1")
 P("(4) and the Mahalanobis detector evaluates the joint plausibility of the embeddings only, z = [Fv | Fs] \u2208 R^144, against the reference distribution of genuinely fresh samples, producing the anomaly signal d_M that drives the chemical-masking alert. The final decision logic combines the Freshness Index FI = 100\u00b7\u0177, the anomaly distance d_M, and an explicit raw-formaldehyde alert rule (CH2O > 2.0 ppm) into one of three deployment states \u2014 Fresh, Suspect (anomaly), or Stale/Spoiled \u2014 with escalation to a CHEMICAL MASKING ALERT when the visual and chemical evidence contradict.")
-FIG(None, "Figure 3.1  Proposed tri-layer system architecture: image branch (MobileNetV2, \u03b1 = 0.35) and sensor branch (MLP) trained independently; their embeddings, the raw scaled sensor channels, and the state posterior are concatenated into a 163-dimensional fusion input; the Mahalanobis layer operates on the 144-dimensional embedding concatenation",
-    placeholder="[INSERT SYSTEM ARCHITECTURE DIAGRAM HERE \u2014 draw this figure (proposal flowchart style); all numeric dimension annotations must match this chapter (Fv 128, Fs 16, raw 16, state 3, u = 163, z = 144).]")
-FIG(None, "Figure 3.2  Data-flow of the fusion input vector construction, annotating the four groups [Fv 128 | Fs 16 | raw 16 | state 3] and their provenance from the two feature extractors and the sensor branch's softmax head",
-    placeholder="[INSERT FUSION DATA-FLOW DIAGRAM HERE \u2014 163-D input groups and their sources.]")
+FIG(os.path.join(ASSET_DIR, "figure3_1_architecture.png"),
+    "Figure 3.1  Proposed tri-layer system architecture: image branch (MobileNetV2, \u03b1 = 0.35) and sensor branch (MLP) trained independently; their embeddings, the raw scaled sensor channels, and the state posterior are concatenated into a 163-dimensional fusion input; the Mahalanobis layer operates on the 144-dimensional embedding concatenation")
+FIG(os.path.join(ASSET_DIR, "figure3_2_fusion_flow.png"),
+    "Figure 3.2  Data-flow of the fusion input vector construction, annotating the four groups [Fv 128 | Fs 16 | raw 16 | state 3] and their provenance from the two feature extractors and the sensor branch's softmax head")
 
 H2("3.2 Data Sources and the Heterogeneous-Dataset Integration Layer")
 H3("3.2.1 Design Constraint: 100% Public Secondary Data")
