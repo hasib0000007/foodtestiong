@@ -37,7 +37,8 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, classification_report, roc_curve, auc, roc_auc_score
+from sklearn.preprocessing import label_binarize
 from scipy.stats import chi2
 from scipy import ndimage
 
@@ -371,6 +372,19 @@ plt.title("Image branch — loss"); plt.legend()
 plt.subplot(1, 2, 2); plt.plot(hist["accuracy"], label="train"); plt.plot(hist["val_accuracy"], label="val")
 plt.title("Image branch — accuracy"); plt.legend()
 plt.tight_layout(); plt.savefig(f"{OUT}/image_branch_training.png", dpi=150); plt.show()
+
+# v14: ROC curve of the image branch on the validation split. Evaluation-only: reads the
+# trained model and the untouched val split, changes nothing about training or exports.
+img_prob = image_branch.predict(val_ds, verbose=0).ravel()
+fpr_i, tpr_i, _ = roc_curve(labels[val_idx], img_prob)
+auc_img_branch = float(auc(fpr_i, tpr_i))
+plt.figure(figsize=(4.8, 4.8))
+plt.plot(fpr_i, tpr_i, color="black", lw=1.8, label=f"image branch (AUC = {auc_img_branch:.4f})")
+plt.plot([0, 1], [0, 1], "k:", lw=1, label="chance")
+plt.xlabel("False positive rate"); plt.ylabel("True positive rate")
+plt.title("Image branch \u2014 ROC (validation)"); plt.legend(loc="lower right", fontsize=8)
+plt.tight_layout(); plt.savefig(f"{OUT}/image_branch_roc.png", dpi=150); plt.show()
+print(f"[ROC] Image branch val AUC = {auc_img_branch:.4f} on {len(val_idx):,} held-out images")
 
 image_branch.save(f"{OUT}/image_branch.keras")
 image_feature_extractor.save(f"{OUT}/image_feature_extractor.keras")
@@ -709,6 +723,27 @@ plt.title("Sensor branch — Confusion Matrix")
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_confusion_matrix.png", dpi=150); plt.show()
 print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Masked"], digits=3,
                             zero_division=0))
+
+# v14: one-vs-rest ROC curves of the sensor branch on the held-out validation split.
+# Evaluation-only; per-class AUC is reported alongside the synthetic-provenance caveat
+# for the Masked class. Nothing about training, checkpoints, or exports is affected.
+y_prob = sensor_branch.predict(X_va, batch_size=BATCH_SENSOR, verbose=0)
+Y_bin = label_binarize(y_va, classes=[0, 1, 2])
+plt.figure(figsize=(4.9, 4.9))
+for k, name in enumerate(["Stale", "Fresh", "Masked"]):
+    fpr_k, tpr_k, _ = roc_curve(Y_bin[:, k], y_prob[:, k])
+    plt.plot(fpr_k, tpr_k, lw=1.8, label=f"{name} (AUC = {auc(fpr_k, tpr_k):.4f})")
+fpr_mi, tpr_mi, _ = roc_curve(Y_bin.ravel(), y_prob.ravel())
+plt.plot(fpr_mi, tpr_mi, "k:", lw=1.2, label=f"micro-avg (AUC = {auc(fpr_mi, tpr_mi):.4f})")
+plt.plot([0, 1], [0, 1], "--", color="0.6", lw=0.8, label="chance")
+plt.xlabel("False positive rate"); plt.ylabel("True positive rate")
+plt.title("Sensor branch \u2014 one-vs-rest ROC (validation)")
+plt.legend(loc="lower right", fontsize=7.5)
+plt.tight_layout(); plt.savefig(f"{OUT}/sensor_roc_curves.png", dpi=150); plt.show()
+auc_per_class = {name: round(float(auc(*roc_curve(Y_bin[:, k], y_prob[:, k])[:2])), 4)
+                 for k, name in enumerate(["Stale", "Fresh", "Masked"])}
+macro_auc = float(roc_auc_score(Y_bin, y_prob, average="macro", multi_class="ovr"))
+print(f"[ROC] Sensor branch one-vs-rest AUC (macro) = {macro_auc:.4f} on {len(y_va):,} rows | per-class: {auc_per_class}")
 
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
 sensor_feature_extractor.save(f"{OUT}/sensor_feature_extractor.keras")
