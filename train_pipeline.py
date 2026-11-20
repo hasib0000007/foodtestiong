@@ -110,7 +110,8 @@ EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
 EPOCHS_FINETUNE = 2        # Part A, phase 2 (fine-tune last backbone block, 0 = skip)
 EPOCHS_SENSOR = 30         # Part B
 EPOCHS_FUSION = 25         # Part C
-PAIR_LIMIT = 400           # max paired samples for the fusion set
+PAIR_LIMIT = 4000          # max paired samples for the fusion set (balanced across 3 states)
+MASKED_PAIR_FRACTION = 0.30   # share of fresh-image pairs paired with masked sensor rows (state 2)
 
 MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows added to Part B
 
@@ -248,7 +249,7 @@ def _make_demo_images(root, per_class=12):
             arr = np.clip(np.array(rgb) + np.random.normal(0, 25, (96, 96, 3)), 0, 255).astype("uint8")
             keras.utils.save_img(os.path.join(d, f"img_{k}.jpg"), arr)
 
-paths, labels, provenance = [], [], []
+paths, labels, dataset_of, provenance = [], [], [], []
 for root in IMAGE_DATASETS:
     if not os.path.isdir(root):
         print(f"[skip] image dataset not attached: {root}")
@@ -259,7 +260,7 @@ for root in IMAGE_DATASETS:
         csv_pairs = labels_from_classes_csv(folder)   # Roboflow multiclass export (meat)
         if csv_pairs:
             for fp, lab in csv_pairs:
-                paths.append(fp); labels.append(lab)
+                paths.append(fp); labels.append(lab); dataset_of.append(dataset_name)
             continue
         # rel-path labeling: tilapia's fresh/stale info lives in PARENT folders
         # (Fresh_Day1/Eyes, NonFresh/Day3/Eyes), not in the leaf basename ('Eyes').
@@ -268,7 +269,7 @@ for root in IMAGE_DATASETS:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
             if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                paths.append(f); labels.append(lab)
+                paths.append(f); labels.append(lab); dataset_of.append(dataset_name)
     provenance.append({"dataset": dataset_name, "images": len(paths) - n0, "label": "fresh/stale"})
 
 if not paths and not RUNNING_ON_KAGGLE:
@@ -280,12 +281,12 @@ if not paths and not RUNNING_ON_KAGGLE:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
             if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                paths.append(f); labels.append(lab)
+                paths.append(f); labels.append(lab); dataset_of.append("_demo_images")
     provenance.append({"dataset": "_demo_images", "images": len(paths), "label": "fresh/stale"})
 
 assert paths, ("No image datasets found — attach at least one Kaggle image dataset and add its "
                "path to IMAGE_DATASETS in the config cell.")
-paths = np.array(paths); labels = np.array(labels)
+paths = np.array(paths); labels = np.array(labels); dataset_of = np.array(dataset_of)
 for prov in provenance:
     print(f"  {prov['dataset']:55s} {prov['images']:6d} images")
 print(f"TOTAL: {len(paths)} images (fresh={labels.sum()}, stale={(labels==0).sum()})")
@@ -341,10 +342,19 @@ if EPOCHS_FINETUNE > 0:
     backbone.trainable = True
     for layer in backbone.layers[:-8]:
         layer.trainable = False
+    for layer in backbone.layers:
+        if isinstance(layer, keras.layers.BatchNormalization):   # freeze BN stats (no val drop)
+            layer.trainable = False
     image_branch.compile(optimizer=keras.optimizers.Adam(1e-5),
                          loss="binary_crossentropy", metrics=["accuracy"])
+    ckpt = keras.callbacks.ModelCheckpoint(f"{OUT}/image_branch_best.keras",
+                                           monitor="val_loss", save_best_only=True)
     h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2,
-                          callbacks=[keras.callbacks.TerminateOnNaN()])
+                          callbacks=[keras.callbacks.TerminateOnNaN(), ckpt])
+    image_branch = keras.models.load_model(f"{OUT}/image_branch_best.keras")   # keep best epoch
+    image_feature_extractor = keras.Model(image_branch.input,
+                                          image_branch.get_layer("fv_embedding").output,
+                                          name="image_feature_extractor")
     hist = {k: h1.history[k] + h2.history[k] for k in h1.history}
 else:
     hist = h1.history
@@ -664,29 +674,53 @@ gc.collect()                                            # release training tempo
 # a fresh ~1M-row x 16-col (~135 MB) pandas copy per iteration -> Kaggle RAM OOM crash.
 SMOOTHED_MATRIX = smoothed[FEATURE_COLS].values.astype(np.float32)
 
-def branch_features_for_pair(base_idx):
-    """Pair image index and sensor row by freshness-state so the two modalities are coherent."""
-    feats, y = [], []
+def build_fusion_pairs(base_idx, chunk=256):
+    """Pair each image with a same-state sensor row; fresh images are also paired with
+    simulated chemical-masked sensor rows (state 2) so the fusion set covers all three
+    states. Images are embedded in chunks to keep RAM flat."""
     rng = np.random.default_rng(SEED)
+    Fv_parts, sens_parts, states = [], [], []
+    imgs, sts = [], []
+    def flush():
+        if imgs:
+            Fv_parts.append(image_feature_extractor.predict(tf.stack(imgs), verbose=0))
+            rows = []
+            for s in sts:
+                pool = (tr_sensor_of_state.get(s) if tr_sensor_of_state.get(s) is not None
+                        else tr_sensor_of_state.get(2, next(iter(tr_sensor_of_state.values()))))
+                rows.append(SMOOTHED_MATRIX[int(rng.choice(pool, size=1)[0])])
+            sens_parts.append(np.stack(rows).astype(np.float32))
+            states.extend(sts)
+            imgs.clear(); sts.clear()
     for i in base_idx:
-        state = labels[i]                                  # 0 stale, 1 fresh (image domain)
-        pool = tr_sensor_of_state[state] if state in tr_sensor_of_state else tr_sensor_of_state[2]
-        cand = int(rng.choice(pool, size=1)[0])
-        img, _ = load_img(paths[i], labels[i])
-        feats.append((img, SMOOTHED_MATRIX[cand]))
-        y.append(state)
-    return feats, np.array(y)
+        st = int(labels[i])                                # 0 stale, 1 fresh (image domain)
+        if st == 1 and 2 in tr_sensor_of_state and rng.random() < MASKED_PAIR_FRACTION:
+            st = 2                                         # fresh-looking image + masked sensor profile
+        img, _ = load_img(paths[int(i)], 0)
+        imgs.append(img); sts.append(st)
+        if len(imgs) >= chunk:
+            flush()
+    flush()
+    Z = np.concatenate([np.concatenate(Fv_parts), np.concatenate(sens_parts)], axis=1)
+    return Z, np.array(states)
 
 tr_sensor_of_state = {int(s): np.flatnonzero(y_tr == s) for s in (0, 1, 2) if (y_tr == s).any()}
 pair_idx = np.random.permutation(len(paths))[:PAIR_LIMIT] if len(paths) > PAIR_LIMIT else np.arange(len(paths))
-pair_feats, pair_state = branch_features_for_pair(pair_idx)
+Z, pair_state = build_fusion_pairs(pair_idx)
+n_state = {int(s): int(c) for s, c in zip(*np.unique(pair_state, return_counts=True))}
+print("Fused feature matrix Z:", Z.shape, "| states:", n_state)
 
-imgs = tf.stack([f[0] for f in pair_feats])
-sens = tf.convert_to_tensor(np.stack([f[1] for f in pair_feats]), dtype=tf.float32)
-Fv = image_feature_extractor.predict(imgs, verbose=0)      # 128-D visual features (frozen branch A)
-Fs = sensor_feature_extractor.predict(sens, verbose=0)     # 16-D telemetry features (frozen branch B)
-Z = np.concatenate([Fv, Fs], axis=1)                       # late-fusion joint matrix (128 + 16)
-print("Fused feature matrix Z:", Z.shape)
+def freshness_index_gt(state):
+    """Soft supervision: 1.0 = fresh, 0.0 = spoiled, middle band = fresh-look anomalies."""
+    return np.where(state == 1, np.random.uniform(0.85, 1.0, len(state)),
+             np.where(state == 0, np.random.uniform(0.05, 0.35, len(state)),
+                      np.random.uniform(0.60, 0.85, len(state)))).astype(np.float32)
+
+split = int(len(Z) * 0.85)                                 # explicit fusion train/val split
+perm = np.random.permutation(len(Z))
+Z_tr, st_tr = Z[perm[:split]], pair_state[perm[:split]]
+Z_va, st_va = Z[perm[split:]], pair_state[perm[split:]]
+gt_tr, gt_va = freshness_index_gt(st_tr), freshness_index_gt(st_va)
 
 # %% [markdown]
 # ### C2. Mahalanobis Distance Matrix (fit on Fresh class)
@@ -718,10 +752,6 @@ def mahalanobis_distance(z):
 # ### C3. Train the Decision Fusion Engine (freshness-index regression)
 
 # %%
-freshness_gt = np.where(pair_state == 1, np.random.uniform(0.85, 1.0, len(pair_state)),
-                 np.where(pair_state == 0, np.random.uniform(0.05, 0.35, len(pair_state)),
-                          np.random.uniform(0.60, 0.85, len(pair_state)))).astype(np.float32)
-
 def build_fusion_engine():
     inp = keras.Input(shape=(EMBED_DIM + SENSOR_EMBED,), name="fusion_input")
     x = layers.Dense(64, activation="relu")(inp)
@@ -733,7 +763,7 @@ def build_fusion_engine():
 fusion_engine = build_fusion_engine()
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
 fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0), loss="mae")
-hf = fusion_engine.fit(Z, freshness_gt.astype(np.float32), validation_split=0.15,
+hf = fusion_engine.fit(Z_tr, gt_tr, validation_data=(Z_va, gt_va),
                        epochs=EPOCHS_FUSION, verbose=2,
                        callbacks=[keras.callbacks.TerminateOnNaN()])
 
@@ -789,10 +819,21 @@ print(json.dumps(demo, indent=2))
 # ### C5. Export for ESP32-S3 (TensorFlow Lite Micro, INT8 quantization)
 
 # %%
-def make_representative_data():
-    n = min(100, len(paths))
-    for i in range(n):                                   # representative images for INT8 calibration
-        img, _ = load_img(paths[i], labels[i])
+def make_representative_data(n=400):
+    """Stratified INT8 calibration: draws equally from every (dataset x class) group so
+    quantization ranges cover all attached image datasets, not just the first 100 files."""
+    rng = np.random.default_rng(SEED)
+    groups = {}
+    for i in range(len(paths)):
+        groups.setdefault((str(dataset_of[i]), int(labels[i])), []).append(i)
+    k = max(1, n // max(len(groups), 1))
+    picks = []
+    for g in groups.values():
+        r = rng.choice(g, size=min(k, len(g)), replace=False)
+        picks.extend(int(x) for x in r)
+    rng.shuffle(picks)
+    for i in picks:
+        img, _ = load_img(paths[i], 0)
         yield [tf.cast(img[tf.newaxis, ...], tf.float32)]
 
 def convert_tflite_int8(model=None):
@@ -823,6 +864,10 @@ except Exception as e:
 edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for c in SENSOR_COLS},
              "max": {c: float(bounds[c][1]) for c in SENSOR_COLS},
              "mahalanobis_threshold": float(MAH_THRESHOLD), "ch2o_alert_ppm": CH2O_ALERT_PPM,
+             "mahalanobis_mean": [float(x) for x in MAH_MEAN],
+             "mahalanobis_shrinkage": 0.10,
+             "fusion_pairs": int(len(Z)),
+             "fusion_states": {str(k): v for k, v in n_state.items()},
              "image_datasets": [p["dataset"] for p in provenance],
              "sensor_datasets": list(coverage_df.dataset) if len(coverage_df) else []}
 with open(f"{OUT}/edge_config.json", "w") as f: json.dump(edge_meta, f, indent=2)
