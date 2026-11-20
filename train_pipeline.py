@@ -30,7 +30,7 @@
 # ## 0. Setup & Configuration
 
 # %%
-import os, glob, json, math, random, gc
+import os, glob, json, math, random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -75,24 +75,14 @@ print("GPU:", tf.config.list_physical_devices("GPU"))
 
 # %%
 def find_ds(*keywords):
-    """Find a dataset folder ANYWHERE under /kaggle/input (some Kaggle sessions mount
-    attached datasets nested, e.g. /kaggle/input/datasets/<slug>). Returns the shallowest
-    (slug-level) folder whose basename contains ALL keywords."""
+    """Return the top-level /kaggle/input/<slug> folder whose basename contains ALL keywords."""
     if not RUNNING_ON_KAGGLE:
         return None
-    best, best_depth = None, 99
-    for dirpath, dirnames, _ in os.walk("/kaggle/input"):
-        base = os.path.basename(dirpath.rstrip(os.sep)).lower()
-        if base and all(k in base for k in keywords):
-            depth = dirpath[len("/kaggle/input"):].count(os.sep)
-            if depth < best_depth:
-                best, best_depth = dirpath, depth
-        if depth_of(dirpath) >= 3:
-            dirnames[:] = []                 # do not crawl into large content trees
-    return best
-
-def depth_of(path):
-    return path[len("/kaggle/input"):].strip(os.sep).count(os.sep) if len(path) > len("/kaggle/input") else 0
+    for root in sorted(glob.glob("/kaggle/input/*")):
+        base = os.path.basename(root).lower()
+        if all(k in base for k in keywords):
+            return root
+    return None
 
 _IMAGE_FALLBACK = [
     "/kaggle/input/fresh-and-stale-images-of-fruits-and-vegetables",   # fruits (raghavrpotdar)
@@ -109,9 +99,8 @@ BATCH_SENSOR = 256          # larger batch for the ~50k-row sensor table
 EPOCHS_HEAD = 5            # Part A, phase 1 (head training, backbone frozen)
 EPOCHS_FINETUNE = 2        # Part A, phase 2 (fine-tune last backbone block, 0 = skip)
 EPOCHS_SENSOR = 30         # Part B
-EPOCHS_FUSION = 40         # Part C (more epochs; ReduceLROnPlateau anneals LR late)
-PAIR_LIMIT = 4000          # max paired samples for the fusion set (balanced across 3 states)
-MASKED_PAIR_FRACTION = 0.30   # share of fresh-image pairs paired with masked sensor rows (state 2)
+EPOCHS_FUSION = 25         # Part C
+PAIR_LIMIT = 400           # max paired samples for the fusion set
 
 MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows added to Part B
 
@@ -123,8 +112,8 @@ MISSING_CHANNEL_GUIDE = {
     "ch2o_ppm":      "attach [Dataset of Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (formalin-labeled gas-sensor food data — closest public proxy for the ZE08-CH2O) or any MQ135 gas-sensor CSV",
     "voc_log_ohm":   "attach [Fruit Freshness Electronic Nose Dataset] https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data (MQ2-MQ135) or [BME688 Odours] https://www.kaggle.com/datasets/laurabasa/bme688-odours (real Bosch BME68x gas resistance — same family as our BME680)",
     "core_temp_c":   "attach [Formalin Tofu Aroma] https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin (Temperature(C) column) or any food-storage temperature CSV",
-    "ambient_temp_c":"attach [IoT Agriculture 2024] https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024 (columns: temperature, humidity — auto-wired as the storage_env entry below) or any IoT temp-humidity CSV (DHT22 logs work too)",
-    "humidity_pct":  "attach [IoT Agriculture 2024] https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024 (columns: temperature, humidity — auto-wired as the storage_env entry below) or any IoT temp-humidity CSV (DHT22 logs work too)",
+    "ambient_temp_c":"attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
+    "humidity_pct":  "attach any IoT food-storage / cold-storage temperature-humidity CSV (e.g. 'IoT Agriculture 2024')",
     "ch2o_voc_ratio":"derived automatically from ch2o_ppm and voc_log_ohm — no extra dataset needed",
     "temp_rise_rate":"derived automatically from core_temp_c and hours_elapsed — no extra dataset needed",
     "hours_elapsed": "usually derivable from timestamps or file/day indices; else attach any time-series food CSV",
@@ -136,7 +125,6 @@ SENSOR_ROOTS = {
     "enose_fruits":   find_ds("electronic-nose") or find_ds("e-nose"),
     "chicken_sensor": find_ds("chicken-meat"),
     "tofu_formalin":  find_ds("aroma-tahu") or find_ds("formalin-tofu"),
-    "storage_env":    find_ds("iot-agriculture"),   # gap-filler: ambient temp + humidity
 }
 print("Auto-resolved sensor roots:", SENSOR_ROOTS)
 SENSOR_CSVS = [
@@ -148,14 +136,13 @@ SENSOR_CSVS = [
                  "core_temp_c": None, "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
     # --- chicken meat dataset: 10 virtual VOC channels + mean/variance + Target ---
-    # verified columns: Category, Shelf_Life_Day, Sensor_1..10, Mean_Value, Variance, Target
-    # Shelf_Life_Day is a REAL hours_elapsed channel (day x 24 via 'scale').
+    # real columns: sensor-level VOC values, 'mean', 'variance', 'target'
+    # ('Fresh_Day4' / 'FrozenThawed_Day6') — no temperature/humidity columns here.
     {"name": "chicken_sensor",
      "path": os.path.join(SENSOR_ROOTS["chicken_sensor"], "**", "*.csv") if SENSOR_ROOTS["chicken_sensor"] else "",
      "label_rule": {"type": "text", "col": "target"},
-     "mapping": {"voc_log_ohm": "Mean_Value", "ch2o_ppm": None, "core_temp_c": None,
-                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": "Shelf_Life_Day"},
-     "scale": {"hours_elapsed": 24.0}},
+     "mapping": {"voc_log_ohm": "mean", "ch2o_ppm": None, "core_temp_c": None,
+                 "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": None}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
     # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
     # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
@@ -165,18 +152,13 @@ SENSOR_CSVS = [
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
-    # --- 4th gap-filler: IoT Agriculture 2024 (wisam1985) — closes ambient_temp_c/humidity_pct ---
-    # IoTProcessed_Data.csv ships the temperature column as 'tempreature' (sic) —
-    # resolved by COLUMN_ALIASES above; humidity is spelled correctly.
-    # greenhouse IoT telemetry; no food-freshness ground truth, so it contributes
-    # REAL environment channels only ('constant' label rows keep part of B stale-side).
-    # alternative: any DHT22/DHT11 CSV — map its columns the same way.
-    {"name": "storage_env",
-     "path": os.path.join(SENSOR_ROOTS["storage_env"], "**", "*.csv") if SENSOR_ROOTS["storage_env"] else "",
-     "label_rule": {"type": "constant"},
-     "mapping": {"ambient_temp_c": "temperature", "humidity_pct": "humidity",
-                 "ch2o_ppm": None, "voc_log_ohm": None, "core_temp_c": None,
-                 "hours_elapsed": None}},
+    # optional 4th (gap-filler): any IoT temp/humidity CSV, e.g.
+    # {"name": "storage_env",
+    #  "path": "/kaggle/input/iot-agriculture-2024/*.csv",
+    #  "label_rule": {"type": "column", "col": "<label-col>"},
+    #  "mapping": {"ambient_temp_c": "<temp-col>", "humidity_pct": "<humidity-col>",
+    #              "ch2o_ppm": None, "voc_log_ohm": None, "core_temp_c": None,
+    #              "hours_elapsed": None}},
 ]
 # if no CSV is configured (e.g. dry run), the notebook falls back to its physics
 # simulator so every cell still executes; replace the list above for real runs.
@@ -206,44 +188,13 @@ def discover_class_dirs(root, dataset_name):
             break
     return class_dirs
 
-def _string_label(text):
-    n = str(text).lower()
-    if any(k in n for k in ("stale", "rotten", "discard", "spoil", "not fresh", "non-fresh",
-                            "non fresh", "nonfresh", "half")):
+def freshness_label(class_name):
+    n = class_name.lower()
+    if "stale" in n or "rotten" in n or "discard" in n or "spoil" in n or "not fresh" in n or "non-fresh" in n or "nonfresh" in n or "half" in n:
         return 0
     if "fresh" in n:
         return 1
     return None
-
-def freshness_label(class_name):
-    """IMPORTANT: checks ONLY the class-folder basename, never the full path.
-    Full-path checks break on slugs like 'fresh-and-STALE-images...'."""
-    return _string_label(os.path.basename(str(class_name)))
-
-def labels_from_classes_csv(folder):
-    """Parse a Roboflow multiclass export (one folder, images + _classes.csv with
-    columns like 'filename,Fresh,Half-Fresh,Spoiled'). Returns [(filepath, 0/1)].
-    Half-Fresh and Spoiled both count as not-fresh (label 0)."""
-    pairs = []
-    for f in glob.glob(os.path.join(folder, "*.csv")):
-        try:
-            df = pd.read_csv(f)
-        except Exception:
-            continue
-        if df.empty or len(df.columns) < 2:
-            continue
-        fname_col, cls_cols = df.columns[0], list(df.columns[1:])
-        if not df[fname_col].astype(str).str.lower().str.endswith((".jpg", ".jpeg", ".png")).all():
-            continue
-        for _, r in df.iterrows():
-            fp = os.path.join(folder, str(r[fname_col]))
-            if not os.path.isfile(fp):
-                continue
-            best = max(cls_cols, key=lambda c: r[c])
-            lab = _string_label(best)
-            if lab is not None:
-                pairs.append((fp, lab))
-    return pairs
 
 def _make_demo_images(root, per_class=12):
     """Tiny synthetic image set used ONLY for local dry runs (never on Kaggle)."""
@@ -255,7 +206,7 @@ def _make_demo_images(root, per_class=12):
             arr = np.clip(np.array(rgb) + np.random.normal(0, 25, (96, 96, 3)), 0, 255).astype("uint8")
             keras.utils.save_img(os.path.join(d, f"img_{k}.jpg"), arr)
 
-paths, labels, dataset_of, provenance = [], [], [], []
+paths, labels, provenance = [], [], []
 for root in IMAGE_DATASETS:
     if not os.path.isdir(root):
         print(f"[skip] image dataset not attached: {root}")
@@ -263,36 +214,29 @@ for root in IMAGE_DATASETS:
     dataset_name = os.path.basename(root.rstrip("/"))
     n0 = len(paths)
     for name, folder in discover_class_dirs(root, dataset_name).items():
-        csv_pairs = labels_from_classes_csv(folder)   # Roboflow multiclass export (meat)
-        if csv_pairs:
-            for fp, lab in csv_pairs:
-                paths.append(fp); labels.append(lab); dataset_of.append(dataset_name)
-            continue
-        # rel-path labeling: tilapia's fresh/stale info lives in PARENT folders
-        # (Fresh_Day1/Eyes, NonFresh/Day3/Eyes), not in the leaf basename ('Eyes').
-        lab = _string_label(os.path.relpath(folder, root))
+        lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
             if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                paths.append(f); labels.append(lab); dataset_of.append(dataset_name)
+                paths.append(f); labels.append(lab)
     provenance.append({"dataset": dataset_name, "images": len(paths) - n0, "label": "fresh/stale"})
 
 if not paths and not RUNNING_ON_KAGGLE:
     _make_demo_images("_demo_images")
     IMAGE_DATASETS = ["_demo_images"]
     for name, folder in discover_class_dirs("_demo_images", "_demo_images").items():
-        lab = _string_label(os.path.basename(name))
+        lab = freshness_label(os.path.basename(name))
         if lab is None:
             continue
         for f in glob.glob(os.path.join(folder, "*")):
             if f.lower().endswith((".jpg", ".jpeg", ".png")):
-                paths.append(f); labels.append(lab); dataset_of.append("_demo_images")
+                paths.append(f); labels.append(lab)
     provenance.append({"dataset": "_demo_images", "images": len(paths), "label": "fresh/stale"})
 
 assert paths, ("No image datasets found — attach at least one Kaggle image dataset and add its "
                "path to IMAGE_DATASETS in the config cell.")
-paths = np.array(paths); labels = np.array(labels); dataset_of = np.array(dataset_of)
+paths = np.array(paths); labels = np.array(labels)
 for prov in provenance:
     print(f"  {prov['dataset']:55s} {prov['images']:6d} images")
 print(f"TOTAL: {len(paths)} images (fresh={labels.sum()}, stale={(labels==0).sum()})")
@@ -348,19 +292,10 @@ if EPOCHS_FINETUNE > 0:
     backbone.trainable = True
     for layer in backbone.layers[:-8]:
         layer.trainable = False
-    for layer in backbone.layers:
-        if isinstance(layer, keras.layers.BatchNormalization):   # freeze BN stats (no val drop)
-            layer.trainable = False
     image_branch.compile(optimizer=keras.optimizers.Adam(1e-5),
                          loss="binary_crossentropy", metrics=["accuracy"])
-    ckpt = keras.callbacks.ModelCheckpoint(f"{OUT}/image_branch_best.keras",
-                                           monitor="val_loss", save_best_only=True)
     h2 = image_branch.fit(train_ds, validation_data=val_ds, epochs=EPOCHS_FINETUNE, verbose=2,
-                          callbacks=[keras.callbacks.TerminateOnNaN(), ckpt])
-    image_branch = keras.models.load_model(f"{OUT}/image_branch_best.keras")   # keep best epoch
-    image_feature_extractor = keras.Model(image_branch.input,
-                                          image_branch.get_layer("fv_embedding").output,
-                                          name="image_feature_extractor")
+                          callbacks=[keras.callbacks.TerminateOnNaN()])
     hist = {k: h1.history[k] + h2.history[k] for k in h1.history}
 else:
     hist = h1.history
@@ -410,23 +345,6 @@ def resolve_label(rule, df, fname):
         return np.full(len(df), 1 if day in rule["fresh_days"] else 0)
     return np.zeros(len(df), dtype=int)   # "constant"
 
-# dataset authors misspell columns (e.g. IoT Agriculture 2024 ships 'tempreature');
-# the alias table lets the canonical mapping resolve them instead of silently dropping
-# the channel into imputation.
-COLUMN_ALIASES = {
-    "temperature": ["tempreature", "temp", "temp_c", "temperature(c)", "temperature(c)"],
-    "humidity":    ["humidity_pct", "humid", "relative_humidity", "rh", "humidity(%)"],
-}
-
-def _resolve_col(df, want):
-    w = want.strip().lower()
-    if w in df.columns:
-        return w
-    for alias in COLUMN_ALIASES.get(w, []):
-        if alias in df.columns:
-            return alias
-    return None
-
 def load_sensor_datasets(cfgs):
     frames, coverage = {}, []
     for cfg in cfgs:
@@ -444,12 +362,9 @@ def load_sensor_datasets(cfgs):
             df.columns = [c.strip().lower() for c in df.columns]
             row = {}
             for canon, raw in cfg["mapping"].items():
-                src_col = _resolve_col(df, raw) if raw else None
-                row[canon] = pd.to_numeric(df[src_col], errors="coerce") if src_col \
-                             else np.full(len(df), np.nan)
+                row[canon] = pd.to_numeric(df[raw.strip().lower()], errors="coerce") if raw \
+                             and raw.strip().lower() in df.columns else np.full(len(df), np.nan)
             sub = pd.DataFrame(row)
-            for canon, mul in cfg.get("scale", {}).items():  # unit harmonization (e.g. days -> hours)
-                sub[canon] = sub[canon] * mul
             for canon in ("hours_elapsed", "ambient_temp_c"):      # still missing? neutral fill + flag
                 if sub[canon].isna().all():
                     sub[canon] = 0.0 if canon == "hours_elapsed" else 25.0
@@ -557,41 +472,6 @@ else:
 # labels adulteration), added in a controlled, clearly-documented proportion.
 
 # %%
-def augment_environmental_channels(df, active_fraction=0.70):
-    """Storage-environment channels that NO attached dataset covers would otherwise stay
-    flat constants the sensor branch cannot learn from. Fill ~70% of rows with realistic
-    DHT22-like synthetic variation (flag 1) and keep ~30% flag 0 so the 'sensor absent'
-    behaviour seen at inference still stays represented (DHT22 future-proofing)."""
-    rng = np.random.default_rng(SEED + 7)
-    fresh_like = (df.label.values == 1) | (df.label.values == 2)   # masked looks fresh
-    added = []
-    if (df["av_ambient_temp_c"] == 0).all():
-        vals = np.where(fresh_like, rng.uniform(12.0, 24.0, len(df)), rng.uniform(20.0, 38.0, len(df)))
-        use = rng.random(len(df)) < active_fraction
-        df["ambient_temp_c"] = np.where(use, vals, df["ambient_temp_c"])
-        df["av_ambient_temp_c"] = use.astype(np.float32)
-        added.append("ambient_temp_c (synthetic, 12-24C stored / 20-38C room)")
-    if (df["av_humidity_pct"] == 0).all():
-        vals = np.where(fresh_like, rng.uniform(40.0, 65.0, len(df)), rng.uniform(60.0, 95.0, len(df)))
-        use = rng.random(len(df)) < active_fraction
-        df["humidity_pct"] = np.where(use, vals, df["humidity_pct"])
-        df["av_humidity_pct"] = use.astype(np.float32)
-        added.append("humidity_pct (synthetic, 40-65% stored / 60-95% room)")
-    if (df["av_temp_rise_rate"] == 0).all():
-        vals = np.where(df.label.values == 2, rng.uniform(0.0, 0.2, len(df)),
-                 np.where(df.label.values == 1, rng.uniform(0.0, 0.3, len(df)),
-                          rng.uniform(0.3, 1.5, len(df))))
-        use = rng.random(len(df)) < active_fraction
-        df["temp_rise_rate"] = np.where(use, vals, df["temp_rise_rate"])
-        df["av_temp_rise_rate"] = use.astype(np.float32)
-        added.append("temp_rise_rate (synthetic C/h, masked < fresh < stale)")
-    if added:
-        print("\n[ENV AUGMENT] uncovered environment channels got synthetic DHT22-like "
-              "variation (70% active rows / 30% kept flag-0 for absent-sensor robustness):")
-        for a in added:
-            print("  •", a)
-    return df
-
 def generate_masking_augment(df, fraction):
     n = int(len(df) * fraction)
     src = df.sample(n, random_state=SEED).copy()
@@ -607,7 +487,6 @@ def generate_masking_augment(df, fraction):
     return pd.concat([df, src], ignore_index=True)
 
 sensor_df = generate_masking_augment(sensor_df, MASK_AUGMENT_FRACTION)
-sensor_df = augment_environmental_channels(sensor_df)
 
 for c in SENSOR_COLS:                       # final NaN/Inf cleanup (guards loss: nan)
     sensor_df[c] = np.nan_to_num(sensor_df[c].values, nan=0.0, posinf=0.0, neginf=0.0)
@@ -647,7 +526,6 @@ for c in SENSOR_COLS:                                   # proposal: min-max scal
 smoothed = scaled.copy()                                # proposal: moving-average smoothing
 smoothed[SENSOR_COLS] = np.clip(
     ndimage.uniform_filter1d(scaled[SENSOR_COLS].values, size=SMOOTH_WIN, axis=0), 0.0, 1.0)
-del scaled                                              # free ~130 MB before feature building
 
 FEATURE_COLS = SENSOR_COLS + AV_COLS                    # values + availability flags
 idx = np.random.permutation(len(smoothed))
@@ -713,7 +591,6 @@ print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Maske
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
 sensor_feature_extractor.save(f"{OUT}/sensor_feature_extractor.keras")
 print("Sensor branch saved (separate training done).")
-gc.collect()                                            # release training temporaries before Part C
 
 # %% [markdown]
 # ## Part C — Feature-Level Late Fusion + Mahalanobis Distance → Decision Fusion Engine
@@ -730,148 +607,74 @@ gc.collect()                                            # release training tempo
 # ### C1. Build a paired multimodal set and extract frozen branch features
 
 # %%
-# Hoist ONCE: calling smoothed[FEATURE_COLS].values inside the pairing loop allocates
-# a fresh ~1M-row x 16-col (~135 MB) pandas copy per iteration -> Kaggle RAM OOM crash.
-SMOOTHED_MATRIX = smoothed[FEATURE_COLS].values.astype(np.float32)
-
-def build_fusion_pairs(base_idx, chunk=256):
-    """Pair each image with a same-state sensor row; fresh images are also paired with
-    simulated chemical-masked sensor rows (state 2) so the fusion set covers all three
-    states. Images are embedded in chunks to keep RAM flat."""
+def branch_features_for_pair(base_idx):
+    """Pair image index and sensor row by freshness-state so the two modalities are coherent."""
+    feats, y = [], []
     rng = np.random.default_rng(SEED)
-    Fv_parts, Fs_parts, raw_parts, states = [], [], [], []
-    imgs, sts, rows = [], [], []
-    def flush():
-        if imgs:
-            Fv_parts.append(image_feature_extractor.predict(tf.stack(imgs), verbose=0))
-            S_in = np.stack(rows).astype(np.float32)
-            Fs_parts.append(sensor_feature_extractor.predict(S_in, verbose=0))
-            raw_parts.append(S_in)
-            states.extend(sts)
-            imgs.clear(); sts.clear(); rows.clear()
     for i in base_idx:
-        st = int(labels[i])                                # 0 stale, 1 fresh (image domain)
-        if st == 1 and 2 in tr_sensor_of_state and rng.random() < MASKED_PAIR_FRACTION:
-            st = 2                                         # fresh-looking image + masked sensor profile
-        img, _ = load_img(paths[int(i)], 0)
-        imgs.append(img); sts.append(st)
-        pool = (tr_sensor_of_state.get(st) if tr_sensor_of_state.get(st) is not None
-                else tr_sensor_of_state.get(2, next(iter(tr_sensor_of_state.values()))))
-        rows.append(SMOOTHED_MATRIX[int(rng.choice(pool, size=1)[0])])
-        if len(imgs) >= chunk:
-            flush()
-    flush()
-    # NOTE: Z must be [Fv | Fs EMBEDDINGS] to match inference, which concatenates the two
-    # feature extractors. The earlier version accidentally embedded RAW sensor inputs here
-    # -> Mahalanobis was fitted in a different 144-d space than demo inference (distance
-    # exploded to ~1e12). Raw sensor rows are kept separately for the fusion engine input.
-    Z = np.concatenate([np.concatenate(Fv_parts), np.concatenate(Fs_parts)], axis=1)
-    S_raw = np.concatenate(raw_parts).astype(np.float32)
-    return Z, S_raw, np.array(states)
+        state = labels[i]                                  # 0 stale, 1 fresh (image domain)
+        pool = tr_sensor_of_state[state] if state in tr_sensor_of_state else tr_sensor_of_state[2]
+        cand = int(rng.choice(pool, size=1)[0])
+        img, _ = load_img(paths[i], labels[i])
+        feats.append((img, smoothed[FEATURE_COLS].values[cand]))
+        y.append(state)
+    return feats, np.array(y)
 
 tr_sensor_of_state = {int(s): np.flatnonzero(y_tr == s) for s in (0, 1, 2) if (y_tr == s).any()}
 pair_idx = np.random.permutation(len(paths))[:PAIR_LIMIT] if len(paths) > PAIR_LIMIT else np.arange(len(paths))
-Z, S_raw, pair_state = build_fusion_pairs(pair_idx)
-n_state = {int(s): int(c) for s, c in zip(*np.unique(pair_state, return_counts=True))}
-print("Fused feature matrix Z:", Z.shape, "| states:", n_state)
+pair_feats, pair_state = branch_features_for_pair(pair_idx)
 
-# sensor branch's 3-class state posterior is appended: state ambiguity between the
-# masked band (0.66-0.74) and the fresh band (0.86-0.94) was the residual val-MAE floor,
-# and the sensor branch already classifies state at ~99.9% — give the engine that signal.
-state_post = sensor_branch.predict(S_raw, batch_size=256, verbose=0)   # S_raw IS the 16-dim sensor input
-FUSION_INPUT = np.concatenate([Z, S_raw, state_post], axis=1).astype(np.float32)
-print("Fusion engine input:", FUSION_INPUT.shape, "(Fv 128 + Fs 16 + raw scaled 16 + state prob 3)")
-
-def freshness_index_gt(state):
-    """Supervision bands with narrow uniform widths — the band width IS the irreducible
-    target noise, so wide bands put a hard floor under the achievable val MAE."""
-    rng = np.random.default_rng(SEED + 11)
-    return np.where(state == 1, rng.uniform(0.88, 0.92, len(state)),
-             np.where(state == 0, rng.uniform(0.17, 0.21, len(state)),
-                      rng.uniform(0.68, 0.72, len(state)))).astype(np.float32)
-
-split = int(len(Z) * 0.85)                                 # explicit fusion train/val split
-perm = np.random.permutation(len(Z))
-Xf_tr, st_tr = FUSION_INPUT[perm[:split]], pair_state[perm[:split]]
-Xf_va, st_va = FUSION_INPUT[perm[split:]], pair_state[perm[split:]]
-gt_tr, gt_va = freshness_index_gt(st_tr), freshness_index_gt(st_va)
+imgs = tf.stack([f[0] for f in pair_feats])
+sens = tf.convert_to_tensor(np.stack([f[1] for f in pair_feats]), dtype=tf.float32)
+Fv = image_feature_extractor.predict(imgs, verbose=0)      # 128-D visual features (frozen branch A)
+Fs = sensor_feature_extractor.predict(sens, verbose=0)     # 16-D telemetry features (frozen branch B)
+Z = np.concatenate([Fv, Fs], axis=1)                       # late-fusion joint matrix (128 + 16)
+print("Fused feature matrix Z:", Z.shape)
 
 # %% [markdown]
 # ### C2. Mahalanobis Distance Matrix (fit on Fresh class)
 
 # %%
 def fit_mahalanobis(Z_fresh):
-    """Numerically bulletproof estimator: float64 accumulation, Ledoit-Wolf-style
-    shrinkage, explicit eigenvalue clipping (dead ReLU directions cannot produce huge
-    inverse entries) and an EMPIRICAL threshold from the fresh-distance distribution."""
-    mean = Z_fresh.mean(axis=0).astype(np.float64)
-    n_dim = Z_fresh.shape[1]
-    Zc = (Z_fresh - mean).astype(np.float64)
-    cov = (Zc.T @ Zc) / max(len(Zc) - 1, 1)
-    mu = float(np.trace(cov)) / n_dim      # average per-dimension variance
-    lam = 0.10                             # Ledoit-Wolf-style shrinkage toward mu*I
-    cov = (1.0 - lam) * cov + lam * mu * np.eye(n_dim) + 1e-6 * np.eye(n_dim)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    floor = max(1e-3 * float(eigvals.max()), 1e-12)   # clip dead/zero-variance directions
-    eigvals = np.clip(eigvals, floor, None)
-    inv_cov = (eigvecs / eigvals) @ eigvecs.T
-    d_fresh = np.sqrt(np.einsum("...i,ij,...j->...", Zc, inv_cov, Zc))
-    thr_emp = float(np.percentile(d_fresh, 99.0))     # empirical 99th pct of REAL fresh distances
-    thr_chi2 = math.sqrt(chi2.ppf(0.99, df=n_dim))    # chi2 reference (Gaussian assumption)
-    thr = max(thr_emp, thr_chi2)
-    return mean, inv_cov.astype(np.float32), thr, d_fresh, thr_chi2
+    mean = Z_fresh.mean(axis=0)
+    cov = np.cov(Z_fresh.T) + 1e-4 * np.eye(Z_fresh.shape[1])   # regularized covariance
+    inv_cov = np.linalg.inv(cov)
+    thr = chi2.ppf(0.99, df=Z_fresh.shape[1])                   # 99 % confidence boundary
+    return mean, inv_cov, math.sqrt(thr)
 
 z_fresh = Z[pair_state == 1]
 if len(z_fresh) < Z.shape[1] + 2:                               # make sure covariance is estimable
     reps = int(np.ceil((Z.shape[1] + 2) / max(len(z_fresh), 1)))
     z_fresh = np.tile(z_fresh, (reps, 1)) + np.random.normal(0, 1e-3, (len(z_fresh) * reps, Z.shape[1]))
-MAH_MEAN, MAH_INV_COV, MAH_THRESHOLD, d_fresh_dbg, THR_CHI2 = fit_mahalanobis(z_fresh)
-print(f"Mahalanobis threshold: {MAH_THRESHOLD:.3f} "
-      f"(empirical p99 of fresh = {float(np.percentile(d_fresh_dbg, 99.0)):.3f}, "
-      f"chi2 99% reference = {THR_CHI2:.3f})")
-print(f"[MAHALANOBIS SANITY] fresh distances: "
-      f"min={d_fresh_dbg.min():.2f} median={np.median(d_fresh_dbg):.2f} "
-      f"p99={np.percentile(d_fresh_dbg, 99):.2f} max={d_fresh_dbg.max():.2f}")
-assert np.isfinite(d_fresh_dbg).all() and d_fresh_dbg.max() < 1e4, (
-    "[MAHALANOBIS SANITY] fresh distances exploded — paste this report back to the chat.")
-if (pair_state == 0).any():
-    Zc_stale = (Z[pair_state == 0] - MAH_MEAN).astype(np.float64)
-    d_stale_dbg = np.sqrt(np.einsum("...i,ij,...j->...", Zc_stale, MAH_INV_COV.astype(np.float64), Zc_stale))
-    print(f"[MAHALANOBIS SANITY] stale distances: "
-          f"median={np.median(d_stale_dbg):.2f} p99={np.percentile(d_stale_dbg, 99):.2f} "
-          f"(must sit ABOVE the fresh p99 for the detector to separate them)")
+MAH_MEAN, MAH_INV_COV, MAH_THRESHOLD = fit_mahalanobis(z_fresh)
+print(f"Mahalanobis threshold (99 %, chi2): {MAH_THRESHOLD:.3f}")
 
 def mahalanobis_distance(z):
-    zf = np.asarray(z, np.float64)
-    inv64 = MAH_INV_COV.astype(np.float64)
-    d = zf - MAH_MEAN
-    return float(np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))) if np.ndim(zf) == 1 \
-        else np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))
+    d = z - MAH_MEAN
+    return np.sqrt(np.einsum("...i,ij,...j->...", d, MAH_INV_COV, d))
 
 # %% [markdown]
 # ### C3. Train the Decision Fusion Engine (freshness-index regression)
 
 # %%
-def build_fusion_engine(n_in):
-    inp = keras.Input(shape=(n_in,), name="fusion_input")
-    x = layers.Dense(128, activation="relu")(inp)
-    x = layers.LayerNormalization(name="fusion_norm")(x)   # stable scale across feature groups
-    x = layers.Dense(64, activation="relu")(x)
-    x = layers.Dropout(0.15)(x)
+freshness_gt = np.where(pair_state == 1, np.random.uniform(0.85, 1.0, len(pair_state)),
+                 np.where(pair_state == 0, np.random.uniform(0.05, 0.35, len(pair_state)),
+                          np.random.uniform(0.60, 0.85, len(pair_state)))).astype(np.float32)
+
+def build_fusion_engine():
+    inp = keras.Input(shape=(EMBED_DIM + SENSOR_EMBED,), name="fusion_input")
+    x = layers.Dense(64, activation="relu")(inp)
+    x = layers.Dropout(0.2)(x)
     x = layers.Dense(32, activation="relu")(x)
     out = layers.Dense(1, activation="sigmoid", name="freshness_index")(x)
     return keras.Model(inp, out, name="fusion_engine")
 
-FUSION_IN_DIM = EMBED_DIM + SENSOR_EMBED + len(FEATURE_COLS) + 3   # 144 + 16 + 3 = 163
-fusion_engine = build_fusion_engine(FUSION_IN_DIM)
+fusion_engine = build_fusion_engine()
 image_feature_extractor.trainable = False; sensor_feature_extractor.trainable = False
-fusion_engine.compile(optimizer=keras.optimizers.Adam(3e-4, clipnorm=1.0),
-                      loss=keras.losses.Huber(delta=0.1), metrics=["mae"])
-hf = fusion_engine.fit(Xf_tr, gt_tr, validation_data=(Xf_va, gt_va),
+fusion_engine.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0), loss="mae")
+hf = fusion_engine.fit(Z, freshness_gt.astype(np.float32), validation_split=0.15,
                        epochs=EPOCHS_FUSION, verbose=2,
-                       callbacks=[keras.callbacks.TerminateOnNaN(),
-                                  keras.callbacks.ReduceLROnPlateau(monitor="val_loss",
-                                      factor=0.5, patience=4, min_lr=1e-6, verbose=1)])
+                       callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.plot(hf.history["loss"], label="train"); plt.plot(hf.history["val_loss"], label="val")
 plt.title("Fusion engine — MAE loss"); plt.xlabel("epoch"); plt.legend()
@@ -890,20 +693,13 @@ def decision_fusion_engine(image_path, sensor_feature_vector):
     img, _ = load_img(image_path, 0)
     v = image_feature_extractor.predict(img[tf.newaxis, ...], verbose=0)[0]
     s = sensor_feature_extractor.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...], verbose=0)[0]
-    z = np.concatenate([v, s])[np.newaxis, ...]              # 144-D embedding space (Mahalanobis)
-    sp = sensor_branch.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...],
-                               verbose=0)[0]                 # 3-class state posterior
-    z_in = np.concatenate([z[0], np.asarray(sensor_feature_vector, np.float32),
-                           sp])[np.newaxis, ...].astype(np.float32)
-    index = float(fusion_engine.predict(z_in, verbose=0)[0][0]) * 100.0
+    z = np.concatenate([v, s])[np.newaxis, ...]
+    index = float(fusion_engine.predict(z, verbose=0)[0][0]) * 100.0
     d = float(mahalanobis_distance(z[0]))
-    if d > MAH_THRESHOLD and len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
-        i_ch2o = FEATURE_COLS.index("ch2o_ppm")
-        lo, hi = bounds["ch2o_ppm"]
-        raw_ch2o = sensor_feature_vector[i_ch2o] * (hi - lo) + lo   # unscale [0,1] -> ppm
-        if raw_ch2o > CH2O_ALERT_PPM:
-            return {"freshness_index": round(index, 1), "mahalanobis": round(d, 2),
-                    "state": "CHEMICAL MASKING ALERT — visual freshness contradicts toxic gas profile"}
+    if d > MAH_THRESHOLD and (len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm")
+                              and sensor_feature_vector[FEATURE_COLS.index("ch2o_ppm")] > CH2O_ALERT_PPM):
+        return {"freshness_index": round(index, 1), "mahalanobis": round(d, 2),
+                "state": "CHEMICAL MASKING ALERT — visual freshness contradicts toxic gas profile"}
     if index >= 70:
         state = "Fresh"
     elif d > MAH_THRESHOLD and index >= 50:
@@ -929,21 +725,10 @@ print(json.dumps(demo, indent=2))
 # ### C5. Export for ESP32-S3 (TensorFlow Lite Micro, INT8 quantization)
 
 # %%
-def make_representative_data(n=400):
-    """Stratified INT8 calibration: draws equally from every (dataset x class) group so
-    quantization ranges cover all attached image datasets, not just the first 100 files."""
-    rng = np.random.default_rng(SEED)
-    groups = {}
-    for i in range(len(paths)):
-        groups.setdefault((str(dataset_of[i]), int(labels[i])), []).append(i)
-    k = max(1, n // max(len(groups), 1))
-    picks = []
-    for g in groups.values():
-        r = rng.choice(g, size=min(k, len(g)), replace=False)
-        picks.extend(int(x) for x in r)
-    rng.shuffle(picks)
-    for i in picks:
-        img, _ = load_img(paths[i], 0)
+def make_representative_data():
+    n = min(100, len(paths))
+    for i in range(n):                                   # representative images for INT8 calibration
+        img, _ = load_img(paths[i], labels[i])
         yield [tf.cast(img[tf.newaxis, ...], tf.float32)]
 
 def convert_tflite_int8(model=None):
@@ -955,15 +740,15 @@ def convert_tflite_int8(model=None):
     conv.inference_output_type = tf.int8
     return conv.convert()
 
-# image INT8 and fusion exports are INDEPENDENT so one failure can never skip the other
-import warnings
-warnings.filterwarnings("ignore", message="Statistics for quantized inputs")   # harmless TFLite calibration note
 try:
     tfl = convert_tflite_int8(image_branch)
     with open(f"{OUT}/image_branch_int8.tflite", "wb") as f: f.write(tfl)
     with open(f"{OUT}/image_branch.cc", "w") as f:
         f.write("const unsigned char g_image_branch[] = {" + ",".join(str(b) for b in tfl) + "};\n")
-    print("TFLite INT8 (image) export OK")
+    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)
+    conv.optimizations = [tf.lite.Optimize.DEFAULT]
+    with open(f"{OUT}/fusion_engine_dyn.tflite", "wb") as f: f.write(conv.convert())
+    print("TFLite INT8 export OK")
 except Exception as e:
     print("INT8 export fallback:", e)
     conv = tf.lite.TFLiteConverter.from_keras_model(image_branch)
@@ -971,62 +756,12 @@ except Exception as e:
     with open(f"{OUT}/image_branch_dyn.tflite", "wb") as f: f.write(conv.convert())
     print("Saved dynamic-range TFLite instead")
 
-try:
-    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)   # float32 — TFLM-safe
-    f32 = conv.convert()
-    with open(f"{OUT}/fusion_engine_f32.tflite", "wb") as f: f.write(f32)
-    with open(f"{OUT}/fusion_engine.cc", "w") as f:
-        f.write("const unsigned char g_fusion_engine[] = {" + ",".join(str(b) for b in f32) + "};\n")
-    print("TFLite Float32 (fusion) export OK")
-except Exception as e:
-    print("FUSION EXPORT FAILED:", e)
-
 edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for c in SENSOR_COLS},
              "max": {c: float(bounds[c][1]) for c in SENSOR_COLS},
              "mahalanobis_threshold": float(MAH_THRESHOLD), "ch2o_alert_ppm": CH2O_ALERT_PPM,
-             "mahalanobis_mean": [float(x) for x in MAH_MEAN],
-             "mahalanobis_shrinkage": 0.10,
-             "fusion_pairs": int(len(Z)),
-             "fusion_states": {str(k): v for k, v in n_state.items()},
-             "fusion_input": "concat(Fv 128, Fs 16, raw_scaled 16, state_prob 3) = 163",
-             "freshness_index_bands": {"fresh": [0.88, 0.92], "masked": [0.68, 0.72], "stale": [0.17, 0.21]},
-             "mahalanobis_inv_cov": [[float(x) for x in row] for row in np.asarray(MAH_INV_COV, np.float64)],
              "image_datasets": [p["dataset"] for p in provenance],
              "sensor_datasets": list(coverage_df.dataset) if len(coverage_df) else []}
 with open(f"{OUT}/edge_config.json", "w") as f: json.dump(edge_meta, f, indent=2)
-
-# ---- ESP32-S3 firmware header: scaling bounds + Mahalanobis detector as C arrays ----
-def _cpp_array_1d(name, arr, per_line=8):
-    vals = [f"{float(v):.8e}f" for v in np.asarray(arr, np.float64).ravel()]
-    lines = [", ".join(vals[i:i + per_line]) for i in range(0, len(vals), per_line)]
-    return f"const float {name}[{len(vals)}] = {{\n  " + ",\n  ".join(lines) + "\n}};"
-
-def _cpp_array_2d(name, mat):
-    rows = []
-    for r in np.asarray(mat, np.float64):
-        rows.append("{" + ",".join(f"{float(v):.8e}f" for v in r) + "}")
-    n = len(rows)
-    return f"const float {name}[{n}][{n}] = {{\n  " + ",\n  ".join(rows) + "\n}};"
-
-with open(f"{OUT}/edge_config.h", "w") as f:
-    f.write("#ifndef EDGE_CONFIG_H\n#define EDGE_CONFIG_H\n\n")
-    f.write("// Auto-generated by train_pipeline.py — do not edit by hand.\n")
-    f.write(f"// Mahalanobis: mean + shrunk inverse covariance of the FRESH class in the "
-            f"144-d fused embedding space [Fv 128 | Fs 16].\n\n")
-    f.write("#define NUM_SENSOR_VALUE_COLS 8\n")
-    f.write("#define NUM_FEATURES 16          // 8 scaled sensor values + 8 availability flags\n")
-    f.write(f"#define MAH_DIM {Z.shape[1]}\n")
-    f.write(f"#define FUSION_INPUT_DIM {FUSION_IN_DIM}     // Fv 128 + Fs 16 + raw scaled 16 + state prob 3\n")
-    f.write(f"#define MAH_THRESHOLD {MAH_THRESHOLD:.4f}f\n")
-    f.write(f"#define CH2O_ALERT_PPM {CH2O_ALERT_PPM:.1f}f\n\n")
-    f.write("static const char *SENSOR_FEATURE_NAMES[NUM_FEATURES] = {\n")
-    f.write("  " + ",\n  ".join(f'"{c}"' for c in FEATURE_COLS) + "\n};\n\n")
-    f.write(_cpp_array_1d("SENSOR_MIN", [bounds[c][0] for c in SENSOR_COLS]) + "\n\n")
-    f.write(_cpp_array_1d("SENSOR_MAX", [bounds[c][1] for c in SENSOR_COLS]) + "\n\n")
-    f.write(_cpp_array_1d("MAH_MEAN", MAH_MEAN) + "\n\n")
-    f.write(_cpp_array_2d("MAH_INV_COV", MAH_INV_COV) + "\n\n")
-    f.write("#endif\n")
-print("edge_config.h generated for ESP32-S3 firmware (bounds + threshold + mean + 144x144 inv covariance)")
 
 print("\nArtifacts in", OUT, ":")
 for f in sorted(glob.glob(f"{OUT}/*")):
