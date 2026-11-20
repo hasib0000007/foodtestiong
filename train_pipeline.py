@@ -948,23 +948,29 @@ def convert_tflite_int8(model=None):
     conv.inference_output_type = tf.int8
     return conv.convert()
 
+# image INT8 and fusion exports are INDEPENDENT so one failure can never skip the other
 try:
     tfl = convert_tflite_int8(image_branch)
     with open(f"{OUT}/image_branch_int8.tflite", "wb") as f: f.write(tfl)
     with open(f"{OUT}/image_branch.cc", "w") as f:
         f.write("const unsigned char g_image_branch[] = {" + ",".join(str(b) for b in tfl) + "};\n")
-    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)   # float32 — TFLM-safe
-    f32 = conv.convert()
-    with open(f"{OUT}/fusion_engine_f32.tflite", "wb") as f: f.write(f32)
-    with open(f"{OUT}/fusion_engine.cc", "w") as f:
-        f.write("const unsigned char g_fusion_engine[] = {" + ",".join(str(b) for b in f32) + "};\n")
-    print("TFLite INT8 (image) + Float32 (fusion) export OK")
+    print("TFLite INT8 (image) export OK")
 except Exception as e:
     print("INT8 export fallback:", e)
     conv = tf.lite.TFLiteConverter.from_keras_model(image_branch)
     conv.optimizations = [tf.lite.Optimize.DEFAULT]
     with open(f"{OUT}/image_branch_dyn.tflite", "wb") as f: f.write(conv.convert())
     print("Saved dynamic-range TFLite instead")
+
+try:
+    conv = tf.lite.TFLiteConverter.from_keras_model(fusion_engine)   # float32 — TFLM-safe
+    f32 = conv.convert()
+    with open(f"{OUT}/fusion_engine_f32.tflite", "wb") as f: f.write(f32)
+    with open(f"{OUT}/fusion_engine.cc", "w") as f:
+        f.write("const unsigned char g_fusion_engine[] = {" + ",".join(str(b) for b in f32) + "};\n")
+    print("TFLite Float32 (fusion) export OK")
+except Exception as e:
+    print("FUSION EXPORT FAILED:", e)
 
 edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for c in SENSOR_COLS},
              "max": {c: float(bounds[c][1]) for c in SENSOR_COLS},
