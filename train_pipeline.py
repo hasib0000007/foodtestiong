@@ -956,6 +956,8 @@ def convert_tflite_int8(model=None):
     return conv.convert()
 
 # image INT8 and fusion exports are INDEPENDENT so one failure can never skip the other
+import warnings
+warnings.filterwarnings("ignore", message="Statistics for quantized inputs")   # harmless TFLite calibration note
 try:
     tfl = convert_tflite_int8(image_branch)
     with open(f"{OUT}/image_branch_int8.tflite", "wb") as f: f.write(tfl)
