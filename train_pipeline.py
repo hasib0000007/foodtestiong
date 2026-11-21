@@ -38,8 +38,9 @@
 # mapping value of `None` means the dataset has no data for that channel — the
 # loader records an availability flag and imputes the value from cross-dataset
 # statistics. The chemically masked class (label 2) trains on REAL formalin-confirmed
-# QC rows from the Formalin Tofu Aroma dataset; `MASK_AUGMENT_FRACTION` adds a
-# physics-based simulated component that widens that class's coverage.
+# QC rows from the Formalin Tofu Aroma dataset. `MASK_AUGMENT_FRACTION` can add a
+# physics-based simulated component, but it is disabled by default so every class is
+# trained on real data only; class weighting compensates for the remaining imbalance.
 
 # %%
 import os, glob, json, math, random, gc
@@ -109,7 +110,7 @@ EPOCHS_FUSION = 40         # Part C; ReduceLROnPlateau anneals the learning rate
 PAIR_LIMIT = 4000          # max paired samples for the fusion set (balanced across 3 states)
 MASKED_PAIR_FRACTION = 0.30   # share of fresh-image pairs paired with masked sensor rows (state 2)
 
-MASK_AUGMENT_FRACTION = 0.25   # simulated chemical-masking rows added to Part B, on top of the real formalin class
+MASK_AUGMENT_FRACTION = 0.0    # optional simulated chemical-masking rows for Part B; 0 keeps the masked class 100% real (class_weight handles the imbalance)
 
 IMG_AUGMENT = True            # random flip/rotation/zoom inside the image branch
                               # (training-time augmentation)
@@ -406,11 +407,11 @@ print("Image branch saved (separate training done).")
 # 3–4 Kaggle sensor CSV datasets are loaded through per-dataset column mappings into
 # the 8 canonical channels. Missing channels are detected, flagged (availability
 # flags) and imputed from cross-dataset statistics; a coverage report enumerates
-# which extra datasets close the remaining gaps. The masked class (label 2) combines
-# real formalin QC rows with physics-based masking augmentation, and storage-environment
-# channels not covered by any attached dataset receive documented synthetic
-# variation. Min–max scaling and a moving-average pre-filter complete the
-# harmonization.
+# which extra datasets close the remaining gaps. The masked class (label 2) is trained
+# exclusively on real formalin-confirmed QC rows with inverse-frequency class weighting,
+# and storage-environment channels not covered by any attached dataset receive
+# documented synthetic variation. Min–max scaling and a moving-average pre-filter
+# complete the harmonization.
 
 # %%
 def resolve_label(rule, df, fname):
@@ -565,8 +566,7 @@ ALL_COLS = SENSOR_COLS + AV_COLS
 print(f"\nCombined sensor dataset: {sensor_df.shape[0]} rows x {len(ALL_COLS)} features "
       f"(8 channels + 8 availability flags)")
 print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, "
-      f"masked={int((sensor_df.label==2).sum())} real formalin QC rows "
-      f"+ {MASK_AUGMENT_FRACTION:.0%} chemical-masking augmentation")
+      f"masked={int((sensor_df.label==2).sum())} real formalin QC rows; sensor training uses inverse-frequency class weighting")
 print(coverage_df.to_string(index=False))   # per-dataset channel coverage table
 
 missing = [c for c, a in zip(SENSOR_COLS, AV_COLS)
@@ -631,6 +631,8 @@ def augment_environmental_channels(df, active_fraction=0.70):
     return df
 
 def generate_masking_augment(df, fraction):
+    if fraction <= 0:                 # disabled: masked class stays 100% real
+        return df
     n = int(len(df) * fraction)
     src = df.sample(n, random_state=SEED).copy()
     src["ch2o_ppm"] = np.random.uniform(4.0, 9.0, n)                 # toxic gas despite look
@@ -653,7 +655,7 @@ for a in AV_COLS:
     sensor_df[a] = np.nan_to_num(sensor_df[a].values, nan=0.0, posinf=1.0, neginf=0.0)
 
 fig, ax = plt.subplots(figsize=(7, 5))
-for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (formalin QC + simulated)", "tab:red")]:
+for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (formalin QC)", "tab:red")]:
     d = sensor_df[sensor_df.label == lab]
     if len(d) > 2000:
         d = d.sample(2000, random_state=SEED)
@@ -731,8 +733,12 @@ def build_sensor_branch(n_in):
 sensor_branch, sensor_feature_extractor = build_sensor_branch(len(FEATURE_COLS))
 sensor_branch.compile(optimizer=keras.optimizers.Adam(1e-4, clipnorm=1.0),
                       loss="sparse_categorical_crossentropy", metrics=["accuracy"])
+sensor_class_weights = {c: float(min(len(y_tr) / max((y_tr == c).sum(), 1) / 3.0, 25.0))
+                        for c in (0, 1, 2)}   # inverse-frequency, capped to keep val stable
+print("Sensor class weights:", {k: round(v, 2) for k, v in sensor_class_weights.items()})
 hs = sensor_branch.fit(X_tr, y_tr, validation_data=(X_va, y_va),
                        batch_size=BATCH_SENSOR, epochs=EPOCHS_SENSOR, verbose=2,
+                       class_weight=sensor_class_weights,
                        callbacks=[keras.callbacks.TerminateOnNaN()])
 
 plt.figure(figsize=(10, 4))
@@ -835,8 +841,7 @@ SMOOTHED_MATRIX = smoothed[FEATURE_COLS].values.astype(np.float32)
 
 def build_fusion_pairs(base_idx, chunk=256):
     """Pair each image with a same-state sensor row; fresh images are also paired with
-    chemical-masked sensor rows (state 2: real formalin-confirmed QC data plus the
-    simulated component) so the fusion set covers all three
+    formalin-confirmed masked sensor rows (state 2) so the fusion set covers all three
     states. Images are embedded in chunks to keep RAM flat."""
     rng = np.random.default_rng(SEED)
     Fv_parts, Fs_parts, raw_parts, states = [], [], [], []
@@ -944,7 +949,7 @@ if (pair_state == 2).any():
     Zc_masked = (Z[pair_state == 2] - MAH_MEAN).astype(np.float64)
     d_masked_dbg = np.sqrt(np.einsum("...i,ij,...j->...", Zc_masked,
                                      MAH_INV_COV.astype(np.float64), Zc_masked))
-    plt.hist(d_masked_dbg, bins=40, alpha=0.55, color="tab:red", label="Masked (formalin QC + simulated)")
+    plt.hist(d_masked_dbg, bins=40, alpha=0.55, color="tab:red", label="Masked (formalin QC)")
 plt.axvline(MAH_THRESHOLD, color="black", ls="--", lw=1.2,
             label=f"threshold = {MAH_THRESHOLD:.2f}")
 plt.xlabel("Mahalanobis distance"); plt.ylabel("samples")
@@ -988,7 +993,7 @@ fusion_engine.save(f"{OUT}/fusion_engine.keras")
 idx_pred = fusion_engine.predict(Xf_va, verbose=0).ravel()
 plt.figure(figsize=(5.4, 5.4))
 for st, name, c in [(1, "Fresh", "tab:green"), (0, "Stale", "tab:orange"),
-                    (2, "Masked (formalin QC + simulated)", "tab:red")]:
+                    (2, "Masked (formalin QC)", "tab:red")]:
     m = st_va == st
     if m.any():
         mae_st = float(np.mean(np.abs(idx_pred[m] - gt_va[m]))) * 100.0

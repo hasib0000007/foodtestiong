@@ -27,13 +27,12 @@ Optional swap: [Meat Quality Assessment (ASYU 2019)](https://www.kaggle.com/data
 | 3 | [Dataset of Formalin Tofu Aroma](https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin) | Gas ppm array (MQ2/MQ4), product temperature, **formalin-treatment label** (45,000 rows, CC0) | Closest public proxy for ZE08-CH2O: real chemical-adulteration labels on gas-sensor food data |
 | 4 | [IoT Agriculture 2024](https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024) | Ambient temperature + RH time series | Fills the BME680 environmental channels; strengthens the drift-compensation story |
 
-**Chemically-masked class (label 2):** trained on **real formalin-confirmed QC
-rows** extracted from the Formalin Tofu Aroma dataset (QC label 0 = formalin
-detected -> class 2, label 1 = pass -> class 1) — about 21,900 real masked rows.
-The notebook additionally applies controlled simulated adulteration
-augmentation (`MASK_AUGMENT_FRACTION`) on top of that real core to widen the
-class's signature coverage. State both facts in the thesis as *real formalin QC
-labels augmented by physics-based simulation over public sensor telemetry*.
+**Chemically-masked class (label 2):** trained **exclusively on real
+formalin-confirmed QC rows** extracted from the Formalin Tofu Aroma dataset
+(QC label 0 = formalin detected -> class 2, label 1 = pass -> class 1) — about
+21,900 real masked rows. The class is a dataset minority (~2.4 % of rows), so
+training applies inverse-frequency **class weighting**; no synthetic masking
+samples are used (`MASK_AUGMENT_FRACTION = 0`).
 
 **Sensor-hardware note (for the defense):** no public dataset ships data from our
 exact sensors (ZE08-CH2O electrochemical, BME680, MLX90614 IR). The combo covers
@@ -94,8 +93,8 @@ Notes for the thesis:
 fresh/stale image corpora covering fruits, fish, and meat, and four Kaggle
 sensor-telemetry CSVs (MQ e-nose arrays, temperature and humidity logs, and a
 formalin-treated tofu chemical dataset; DOI: 10.5281/zenodo.17285312). The
-chemically-masked class is built from the formalin-confirmed QC rows of that
-dataset and widened by controlled simulated adulteration augmentation.
+chemically-masked class is built exclusively from the formalin-confirmed QC
+rows of that dataset and balanced with class weighting.
 Missing sensor channels across datasets are handled with
 per-dataset availability flags and cross-dataset statistical imputation
 (reported in the coverage table)."

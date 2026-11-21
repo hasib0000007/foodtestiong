@@ -71,14 +71,15 @@ flags, and prints exactly which extra Kaggle dataset closes the remaining holes
 
 ## 3. Chemical-masking class (honesty note for the thesis)
 
-The chemically masked class (label 2) is trained on **real formalin-confirmed rows**:
-the Formalin Tofu Aroma dataset carries a factory QC label, and QC fail rows
-(formalin detected) map directly onto the masked class (~21,900 real rows).
-On top of that, **controlled simulated adulteration augmentation**
-(`MASK_AUGMENT_FRACTION`, default 25 %) spikes CH2O while arresting VOC decay to
-widen the class's coverage for the Mahalanobis layer. Describe it in the thesis
-exactly as that: *real formalin QC labels, augmented by physics-based simulated
-adulteration over public sensor telemetry*.
+All three classes train on **100 % real public data**. The chemically masked class
+(label 2) is sourced directly from the Formalin Tofu Aroma dataset's factory QC
+label: QC fail rows (formalin detected) map onto the masked class (~21,900 real
+rows). The class minority (~2.4 % of rows) is balanced with inverse-frequency
+class weighting during training — no synthetic samples enter the training set.
+The physical `MASK_AUGMENT_FRACTION` switch exists in the code but is disabled
+(0.0) by default. The only synthetic values anywhere are documented
+environment-channel fills for sensors no attached dataset covers (absent-sensor
+robustness), not labelled training samples.
 
 ## 4. Generated results (thesis Ch. 4–6 + defense slides)
 
