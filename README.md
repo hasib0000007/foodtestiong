@@ -57,13 +57,13 @@ flags, and prints exactly which extra Kaggle dataset closes the remaining holes
    [Fruit Freshness Electronic Nose Dataset](https://www.kaggle.com/datasets/mehrabmahdian/food-freshness-electronic-nose-data),
    [Chicken Meat Freshness Dataset](https://www.kaggle.com/datasets/ziya07/chicken-meat-freshness-dataset),
    [Dataset of Formalin Tofu Aroma](https://www.kaggle.com/datasets/yudhaislamisulistya/dataset-aroma-tahu-berfomalin)
-   (closest public proxy for ZE08-CH2O), and
+   (formalin-labeled food gas-sensor data), and
    [IoT Agriculture 2024](https://www.kaggle.com/datasets/wisam1985/iot-agriculture-2024) (temp + RH gap-filler).
    Fill the `SENSOR_CSVS` config with each dataset's column mapping.
    Unattached paths in both lists are skipped automatically — only run what you attach.
 4. **Missing-data behaviour:** the *coverage report* cell prints a dataset × channel
    table (`sensor_dataset_coverage.csv`). Any channel no dataset covers triggers a
-   `[MISSING DATA]` block that names the exact extra Kaggle dataset to attach for
+   missing-channel notice that names the exact extra Kaggle dataset to attach for
    that channel (mapping in `MISSING_CHANNEL_GUIDE`). Derived channels
    (`ch2o_voc_ratio`, `temp_rise_rate`) compute themselves when their parents exist.
 5. **Settings → Accelerator → GPU T4 → Run All** → outputs in

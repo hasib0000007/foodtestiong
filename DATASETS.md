@@ -51,7 +51,7 @@ it as *hardware-validated at deployment*.
 ## Gap-filling table — missing channel → extra dataset to attach
 
 The notebook prints this automatically whenever the attached CSVs leave channels
-uncovered (see `[MISSING DATA]` output + `sensor_dataset_coverage.csv`):
+uncovered (see the notebook's missing-channel notice + `sensor_dataset_coverage.csv`):
 
 | Missing channel | Fix |
 |---|---|
