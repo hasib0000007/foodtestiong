@@ -154,13 +154,13 @@ SENSOR_CSVS = [
                  "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": "Shelf_Life_Day"},
      "scale": {"hours_elapsed": 24.0}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
-    # factory QC label: 1 = pass (formalin-free) -> class 1 (fresh),
-    # 0 = fail (formalin detected) -> class 2 (chemically masked); the masked class
-    # therefore trains on real adulteration-confirmed rows. MQ channels carry the
-    # CH2O-family signal — a documented surrogate for the ZE08-CH2O ppm reading.
+    # factory QC label: 1 = pass (formalin-free), 0 = fail (formalin detected).
+    # QC-fail rows are remapped to the masked class (label 2) inside load_sensor_datasets,
+    # so the masked class trains on real adulteration-confirmed rows. MQ channels carry
+    # the CH2O-family signal — a documented surrogate for the ZE08-CH2O ppm reading.
     {"name": "tofu_formalin",
      "path": os.path.join(SENSOR_ROOTS["tofu_formalin"], "**", "*.csv") if SENSOR_ROOTS["tofu_formalin"] else "",
-     "label_rule": {"type": "column_map", "col": "label", "map": {1: 1, 0: 2}},
+     "label_rule": {"type": "column", "col": "label"},
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
@@ -422,13 +422,6 @@ def resolve_label(rule, df, fname):
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
         y = pd.to_numeric(df[col], errors="coerce")
         return y.fillna(1).astype(int).values
-    if t == "column_map":     # source labels remapped onto canonical classes
-        col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
-        assert col is not None, f"{fname}: label column '{rule['col']}' not found"
-        y = pd.to_numeric(df[col], errors="coerce").fillna(rule.get("default", 1)).astype(int)
-        y = y.map({int(k): int(v) for k, v in rule["map"].items()})
-        assert y.notna().all(), f"{fname}: unexpected labels in '{rule['col']}'"
-        return y.astype(int).values
     if t == "text":           # string labels like 'Fresh_Day4' vs 'FrozenThawed_Day6'
         col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
@@ -506,6 +499,8 @@ def load_sensor_datasets(cfgs):
     assert frames, ("No sensor datasets found — attach Kaggle sensor CSVs and add entries to "
                     "SENSOR_CSVS in the config cell.")
     comb = pd.concat(frames.values(), ignore_index=True)
+    # Map real formalin-treated rows (label == 0) in tofu_formalin to Chemically Masked class (label == 2)
+    comb.loc[(comb["dataset"] == "tofu_formalin") & (comb["label"] == 0), "label"] = 2
     # fill still-missing whole channels from cross-dataset medians (flag 0 keeps the imputation marked)
     for canon in SENSOR_COLS:
         if comb[canon].isna().any():
@@ -520,7 +515,9 @@ def load_sensor_datasets(cfgs):
     for name, g in comb.groupby("dataset"):             # coverage table built AFTER derived channels
         coverage.append({"dataset": name, "rows": len(g),
                          **{c: ("YES" if g[f'av_{c}'].iloc[0] > 0 else "-") for c in SENSOR_COLS},
-                         "fresh": int((g.label == 1).sum()), "stale": int((g.label == 0).sum())})
+                         "fresh": int((g.label == 1).sum()),
+                         "stale": int((g.label == 0).sum()),
+                         "masked": int((g.label == 2).sum())})
     return comb, pd.DataFrame(coverage)
 
 # local dry-run fallback: fabricate three small CSVs with different coverage gaps
@@ -565,7 +562,8 @@ AV_COLS = [f"av_{c}" for c in SENSOR_COLS]
 ALL_COLS = SENSOR_COLS + AV_COLS
 print(f"\nCombined sensor dataset: {sensor_df.shape[0]} rows x {len(ALL_COLS)} features "
       f"(8 channels + 8 availability flags)")
-print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, masked={int((sensor_df.label==2).sum())}")
+print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, "
+      f"masked={int((sensor_df.label==2).sum())} (100% real data, {MASK_AUGMENT_FRACTION:.0%} synthetic augment)")
 print(coverage_df.to_string(index=False))   # per-dataset channel coverage table
 
 missing = [c for c, a in zip(SENSOR_COLS, AV_COLS)
@@ -654,7 +652,7 @@ for a in AV_COLS:
     sensor_df[a] = np.nan_to_num(sensor_df[a].values, nan=0.0, posinf=1.0, neginf=0.0)
 
 fig, ax = plt.subplots(figsize=(7, 5))
-for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (formalin QC)", "tab:red")]:
+for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (real formalin)", "tab:red")]:
     d = sensor_df[sensor_df.label == lab]
     if len(d) > 2000:
         d = d.sample(2000, random_state=SEED)
