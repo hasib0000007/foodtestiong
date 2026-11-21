@@ -37,9 +37,9 @@
 # Each sensor entry maps its own column names onto the 8 canonical channels; a
 # mapping value of `None` means the dataset has no data for that channel — the
 # loader records an availability flag and imputes the value from cross-dataset
-# statistics. `MASK_AUGMENT_FRACTION` controls the physics-based chemical-masking
-# augmentation that creates the simulated masked class (label 2), for which no
-# public dataset provides labels.
+# statistics. The chemically masked class (label 2) trains on REAL formalin-confirmed
+# QC rows from the Formalin Tofu Aroma dataset; `MASK_AUGMENT_FRACTION` adds a
+# physics-based simulated component that widens that class's coverage.
 
 # %%
 import os, glob, json, math, random, gc
@@ -109,7 +109,7 @@ EPOCHS_FUSION = 40         # Part C; ReduceLROnPlateau anneals the learning rate
 PAIR_LIMIT = 4000          # max paired samples for the fusion set (balanced across 3 states)
 MASKED_PAIR_FRACTION = 0.30   # share of fresh-image pairs paired with masked sensor rows (state 2)
 
-MASK_AUGMENT_FRACTION = 0.25   # fraction of simulated chemical-masking rows added to Part B
+MASK_AUGMENT_FRACTION = 0.25   # simulated chemical-masking rows added to Part B, on top of the real formalin class
 
 IMG_AUGMENT = True            # random flip/rotation/zoom inside the image branch
                               # (training-time augmentation)
@@ -153,11 +153,13 @@ SENSOR_CSVS = [
                  "ambient_temp_c": None, "humidity_pct": None, "hours_elapsed": "Shelf_Life_Day"},
      "scale": {"hours_elapsed": 24.0}},
     # --- formalin tofu aroma: only public food dataset with formalin-treatment labels ---
-    # label is factory QC (1 = pass, 0 = fail); MQ channels carry the CH2O-family
-    # signal — a documented surrogate for the ZE08-CH2O electrochemical ppm reading.
+    # factory QC label: 1 = pass (formalin-free) -> class 1 (fresh),
+    # 0 = fail (formalin detected) -> class 2 (chemically masked); the masked class
+    # therefore trains on real adulteration-confirmed rows. MQ channels carry the
+    # CH2O-family signal — a documented surrogate for the ZE08-CH2O ppm reading.
     {"name": "tofu_formalin",
      "path": os.path.join(SENSOR_ROOTS["tofu_formalin"], "**", "*.csv") if SENSOR_ROOTS["tofu_formalin"] else "",
-     "label_rule": {"type": "column", "col": "label"},
+     "label_rule": {"type": "column_map", "col": "label", "map": {1: 1, 0: 2}},
      "mapping": {"ch2o_ppm": "CO_MQ2(ppm)", "voc_log_ohm": "Alcohol_MQ2(ppm)",
                  "core_temp_c": "Temperature(C)", "ambient_temp_c": None,
                  "humidity_pct": None, "hours_elapsed": None}},
@@ -404,8 +406,8 @@ print("Image branch saved (separate training done).")
 # 3–4 Kaggle sensor CSV datasets are loaded through per-dataset column mappings into
 # the 8 canonical channels. Missing channels are detected, flagged (availability
 # flags) and imputed from cross-dataset statistics; a coverage report enumerates
-# which extra datasets close the remaining gaps. Physics-based chemical-masking
-# augmentation creates the simulated masked class (label 2), and storage-environment
+# which extra datasets close the remaining gaps. The masked class (label 2) combines
+# real formalin QC rows with physics-based masking augmentation, and storage-environment
 # channels not covered by any attached dataset receive documented synthetic
 # variation. Min–max scaling and a moving-average pre-filter complete the
 # harmonization.
@@ -419,6 +421,13 @@ def resolve_label(rule, df, fname):
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
         y = pd.to_numeric(df[col], errors="coerce")
         return y.fillna(1).astype(int).values
+    if t == "column_map":     # source labels remapped onto canonical classes
+        col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
+        assert col is not None, f"{fname}: label column '{rule['col']}' not found"
+        y = pd.to_numeric(df[col], errors="coerce").fillna(rule.get("default", 1)).astype(int)
+        y = y.map({int(k): int(v) for k, v in rule["map"].items()})
+        assert y.notna().all(), f"{fname}: unexpected labels in '{rule['col']}'"
+        return y.astype(int).values
     if t == "text":           # string labels like 'Fresh_Day4' vs 'FrozenThawed_Day6'
         col = next((c for c in df.columns if c.strip().lower() == rule["col"].strip().lower()), None)
         assert col is not None, f"{fname}: label column '{rule['col']}' not found"
@@ -555,8 +564,9 @@ AV_COLS = [f"av_{c}" for c in SENSOR_COLS]
 ALL_COLS = SENSOR_COLS + AV_COLS
 print(f"\nCombined sensor dataset: {sensor_df.shape[0]} rows x {len(ALL_COLS)} features "
       f"(8 channels + 8 availability flags)")
-print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())} "
-      f"+ {MASK_AUGMENT_FRACTION:.0%} chemical-masking augmentation in B2")
+print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, "
+      f"masked={int((sensor_df.label==2).sum())} real formalin QC rows "
+      f"+ {MASK_AUGMENT_FRACTION:.0%} chemical-masking augmentation")
 print(coverage_df.to_string(index=False))   # per-dataset channel coverage table
 
 missing = [c for c, a in zip(SENSOR_COLS, AV_COLS)
@@ -643,7 +653,7 @@ for a in AV_COLS:
     sensor_df[a] = np.nan_to_num(sensor_df[a].values, nan=0.0, posinf=1.0, neginf=0.0)
 
 fig, ax = plt.subplots(figsize=(7, 5))
-for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (simulated)", "tab:red")]:
+for lab, name, c in [(0, "Stale (natural)", "tab:orange"), (1, "Fresh", "tab:green"), (2, "Chemically masked (formalin QC + simulated)", "tab:red")]:
     d = sensor_df[sensor_df.label == lab]
     if len(d) > 2000:
         d = d.sample(2000, random_state=SEED)
@@ -825,7 +835,8 @@ SMOOTHED_MATRIX = smoothed[FEATURE_COLS].values.astype(np.float32)
 
 def build_fusion_pairs(base_idx, chunk=256):
     """Pair each image with a same-state sensor row; fresh images are also paired with
-    simulated chemical-masked sensor rows (state 2) so the fusion set covers all three
+    chemical-masked sensor rows (state 2: real formalin-confirmed QC data plus the
+    simulated component) so the fusion set covers all three
     states. Images are embedded in chunks to keep RAM flat."""
     rng = np.random.default_rng(SEED)
     Fv_parts, Fs_parts, raw_parts, states = [], [], [], []
@@ -933,7 +944,7 @@ if (pair_state == 2).any():
     Zc_masked = (Z[pair_state == 2] - MAH_MEAN).astype(np.float64)
     d_masked_dbg = np.sqrt(np.einsum("...i,ij,...j->...", Zc_masked,
                                      MAH_INV_COV.astype(np.float64), Zc_masked))
-    plt.hist(d_masked_dbg, bins=40, alpha=0.55, color="tab:red", label="Masked (simulated)")
+    plt.hist(d_masked_dbg, bins=40, alpha=0.55, color="tab:red", label="Masked (formalin QC + simulated)")
 plt.axvline(MAH_THRESHOLD, color="black", ls="--", lw=1.2,
             label=f"threshold = {MAH_THRESHOLD:.2f}")
 plt.xlabel("Mahalanobis distance"); plt.ylabel("samples")
@@ -977,7 +988,7 @@ fusion_engine.save(f"{OUT}/fusion_engine.keras")
 idx_pred = fusion_engine.predict(Xf_va, verbose=0).ravel()
 plt.figure(figsize=(5.4, 5.4))
 for st, name, c in [(1, "Fresh", "tab:green"), (0, "Stale", "tab:orange"),
-                    (2, "Masked (simulated)", "tab:red")]:
+                    (2, "Masked (formalin QC + simulated)", "tab:red")]:
     m = st_va == st
     if m.any():
         mae_st = float(np.mean(np.abs(idx_pred[m] - gt_va[m]))) * 100.0
