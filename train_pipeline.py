@@ -938,6 +938,18 @@ if (pair_state == 0).any():
           f"median={np.median(d_stale_dbg):.2f} p99={np.percentile(d_stale_dbg, 99):.2f} "
           f"(above the fresh p99, as required for class separation)")
 
+# per-branch detectors on the same fitted fresh reference: separate distances for the
+# visual embedding (Fv, 128-D) and the sensor embedding (Fs, 16-D) so a single sample
+# can be attributed to an image-side or a sensor-side anomaly instead of a fused one
+Fv_fresh = z_fresh[:, :EMBED_DIM]
+Fs_fresh = z_fresh[:, EMBED_DIM:]
+MAH_MEAN_IMG, MAH_INV_COV_IMG, MAH_THRESHOLD_IMG, d_img_dbg, THR_IMG_CHI2 = fit_mahalanobis(Fv_fresh)
+MAH_MEAN_SEN, MAH_INV_COV_SEN, MAH_THRESHOLD_SEN, d_sen_dbg, THR_SEN_CHI2 = fit_mahalanobis(Fs_fresh)
+print(f"Mahalanobis image-branch threshold (Fv 128-D): {MAH_THRESHOLD_IMG:.3f} "
+      f"(empirical p99 = {np.percentile(d_img_dbg, 99.0):.3f}, chi2 99% = {THR_IMG_CHI2:.3f})")
+print(f"Mahalanobis sensor-branch threshold (Fs 16-D): {MAH_THRESHOLD_SEN:.3f} "
+      f"(empirical p99 = {np.percentile(d_sen_dbg, 99.0):.3f}, chi2 99% = {THR_SEN_CHI2:.3f})")
+
 plt.figure(figsize=(6.2, 4.2))
 plt.hist(d_fresh_dbg, bins=40, alpha=0.55, color="tab:green", label="Fresh")
 if (pair_state == 0).any():
@@ -960,6 +972,11 @@ def mahalanobis_distance(z):
     d = zf - MAH_MEAN
     return float(np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))) if np.ndim(zf) == 1 \
         else np.sqrt(np.einsum("...i,ij,...j->...", d, inv64, d))
+
+def mahalanobis_distance_in(z, mean, inv_cov):
+    d = np.asarray(z, np.float64) - np.asarray(mean, np.float64)
+    val = float(d @ np.asarray(inv_cov, np.float64) @ d)
+    return float(np.sqrt(max(val, 0.0)))
 
 def build_fusion_engine(n_in):
     inp = keras.Input(shape=(n_in,), name="fusion_input")
@@ -1006,32 +1023,51 @@ plt.tight_layout(); plt.savefig(f"{OUT}/fusion_scatter.png", dpi=150); plt.show(
 CH2O_ALERT_PPM = 2.0   # ZE08-CH2O reading above the ambient formaldehyde background
 
 def decision_fusion_engine(image_path, sensor_feature_vector):
-    """Full pipeline for one sample: image + CANONICAL sensor feature row -> result dict.
+    """Full pipeline for one sample: image + CANONICAL sensor feature row -> detailed result dict.
        `sensor_feature_vector` must already be scaled (value-channels in [0,1], flags 0/1)."""
     img, _ = load_img(image_path, 0)
     v = image_feature_extractor.predict(img[tf.newaxis, ...], verbose=0)[0]
     s = sensor_feature_extractor.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...], verbose=0)[0]
-    z = np.concatenate([v, s])[np.newaxis, ...]              # 144-D embedding space (Mahalanobis)
+    z = np.concatenate([v, s])                               # 144-D fused embedding space
     sp = sensor_branch.predict(np.asarray(sensor_feature_vector, np.float32)[tf.newaxis, ...],
                                verbose=0)[0]                 # 3-class state posterior
-    z_in = np.concatenate([z[0], np.asarray(sensor_feature_vector, np.float32),
-                           sp])[np.newaxis, ...].astype(np.float32)
-    index = float(fusion_engine.predict(z_in, verbose=0)[0][0]) * 100.0
-    d = float(mahalanobis_distance(z[0]))
-    if d > MAH_THRESHOLD and len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
+    fusion_inp = np.concatenate([v, s, np.asarray(sensor_feature_vector, np.float32),
+                                 sp])[np.newaxis, ...].astype(np.float32)   # 163-D fusion input
+    index = float(fusion_engine.predict(fusion_inp, verbose=0)[0][0]) * 100.0
+    d_img = mahalanobis_distance_in(v, MAH_MEAN_IMG, MAH_INV_COV_IMG)
+    d_sen = mahalanobis_distance_in(s, MAH_MEAN_SEN, MAH_INV_COV_SEN)
+    d_fus = mahalanobis_distance(z)
+    image_anomaly = bool(d_img > MAH_THRESHOLD_IMG)
+    sensor_anomaly = bool(d_sen > MAH_THRESHOLD_SEN)
+    raw_ch2o = None
+    if len(sensor_feature_vector) > FEATURE_COLS.index("ch2o_ppm"):
         i_ch2o = FEATURE_COLS.index("ch2o_ppm")
         lo, hi = bounds["ch2o_ppm"]
-        raw_ch2o = sensor_feature_vector[i_ch2o] * (hi - lo) + lo   # unscale [0,1] -> ppm
-        if raw_ch2o > CH2O_ALERT_PPM:
-            return {"freshness_index": round(index, 1), "mahalanobis": round(d, 2),
-                    "state": "CHEMICAL MASKING ALERT — visual freshness contradicts toxic gas profile"}
-    if index >= 70:
+        raw_ch2o = float(sensor_feature_vector[i_ch2o]) * (hi - lo) + lo   # unscale [0,1] -> ppm
+    chemical_detected = bool((raw_ch2o is not None and raw_ch2o > CH2O_ALERT_PPM)
+                             or (sensor_anomaly and not image_anomaly))
+    if chemical_detected:
+        state = "CHEMICAL ALERT \u2014 Sensor/Gas anomaly detected while image looks fresh"
+    elif image_anomaly and not sensor_anomaly:
+        state = "VISUAL DEFECT \u2014 Image shows surface spoilage, gas normal"
+    elif image_anomaly and sensor_anomaly:
+        state = "SPOILED \u2014 Both image and gas indicate rot"
+    elif index >= 70 and d_fus <= MAH_THRESHOLD:
         state = "Fresh"
-    elif d > MAH_THRESHOLD and index >= 50:
-        state = "Suspect — anomaly (internal rot / drift)"
     else:
-        state = "Stale / Spoiled"
-    return {"freshness_index": round(index, 1), "mahalanobis": round(d, 2), "state": state}
+        state = "Suspect / Stale"
+    return {"freshness_index": round(index, 1),
+            "mahalanobis_image": {"distance": round(d_img, 2),
+                                  "threshold": round(MAH_THRESHOLD_IMG, 2),
+                                  "anomaly": image_anomaly},
+            "mahalanobis_chemical_sensor": {"distance": round(d_sen, 2),
+                                            "threshold": round(MAH_THRESHOLD_SEN, 2),
+                                            "anomaly": sensor_anomaly},
+            "mahalanobis_fused": {"distance": round(d_fus, 2),
+                                  "threshold": round(MAH_THRESHOLD, 2)},
+            "chemical_detected": chemical_detected,
+            "ch2o_ppm": round(raw_ch2o, 2) if raw_ch2o is not None else None,
+            "state": state}
 
 def canonical_sensor_row(raw_dataset_df_row):
     """Convenience: build a scaled canonical feature row from one raw dataset row."""
@@ -1112,6 +1148,10 @@ edge_meta = {"sensor_features": FEATURE_COLS, "min": {c: float(bounds[c][0]) for
              "max": {c: float(bounds[c][1]) for c in SENSOR_COLS},
              "mahalanobis_threshold": float(MAH_THRESHOLD), "ch2o_alert_ppm": CH2O_ALERT_PPM,
              "mahalanobis_mean": [float(x) for x in MAH_MEAN],
+             "mahalanobis_image_threshold": float(MAH_THRESHOLD_IMG),
+             "mahalanobis_sensor_threshold": float(MAH_THRESHOLD_SEN),
+             "mahalanobis_image_mean": [float(x) for x in MAH_MEAN_IMG],
+             "mahalanobis_sensor_mean": [float(x) for x in MAH_MEAN_SEN],
              "mahalanobis_shrinkage": 0.10,
              "fusion_pairs": int(len(Z)),
              "fusion_states": {str(k): v for k, v in n_state.items()},
@@ -1145,15 +1185,19 @@ with open(f"{OUT}/edge_config.h", "w") as f:
     f.write(f"#define MAH_DIM {Z.shape[1]}\n")
     f.write(f"#define FUSION_INPUT_DIM {FUSION_IN_DIM}     // Fv 128 + Fs 16 + raw scaled 16 + state prob 3\n")
     f.write(f"#define MAH_THRESHOLD {MAH_THRESHOLD:.4f}f\n")
+    f.write(f"#define MAH_IMG_THRESHOLD {MAH_THRESHOLD_IMG:.4f}f\n")
+    f.write(f"#define MAH_SEN_THRESHOLD {MAH_THRESHOLD_SEN:.4f}f\n")
     f.write(f"#define CH2O_ALERT_PPM {CH2O_ALERT_PPM:.1f}f\n\n")
     f.write("static const char *SENSOR_FEATURE_NAMES[NUM_FEATURES] = {\n")
     f.write("  " + ",\n  ".join(f'"{c}"' for c in FEATURE_COLS) + "\n};\n\n")
     f.write(_cpp_array_1d("SENSOR_MIN", [bounds[c][0] for c in SENSOR_COLS]) + "\n\n")
     f.write(_cpp_array_1d("SENSOR_MAX", [bounds[c][1] for c in SENSOR_COLS]) + "\n\n")
     f.write(_cpp_array_1d("MAH_MEAN", MAH_MEAN) + "\n\n")
+    f.write(_cpp_array_1d("MAH_MEAN_IMG", MAH_MEAN_IMG) + "\n\n")
+    f.write(_cpp_array_1d("MAH_MEAN_SEN", MAH_MEAN_SEN) + "\n\n")
     f.write(_cpp_array_2d("MAH_INV_COV", MAH_INV_COV) + "\n\n")
     f.write("#endif\n")
-print("edge_config.h generated for ESP32-S3 firmware (bounds + threshold + mean + 144x144 inv covariance)")
+print("edge_config.h generated for ESP32-S3 firmware (bounds + per-branch thresholds + means + 144x144 inv covariance)")
 
 edge_files = ["image_branch_int8.tflite", "image_branch.cc", "fusion_engine_f32.tflite",
               "fusion_engine.cc", "edge_config.h", "image_branch.keras", "fusion_engine.keras"]
