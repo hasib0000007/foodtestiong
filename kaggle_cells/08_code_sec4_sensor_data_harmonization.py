@@ -85,6 +85,15 @@ def load_sensor_datasets(cfgs):
     comb = pd.concat(frames.values(), ignore_index=True)
     # Map real formalin-treated rows (label == 0) in tofu_formalin to Chemically Masked class (label == 2)
     comb.loc[(comb["dataset"] == "tofu_formalin") & (comb["label"] == 0), "label"] = 2
+    # Stratified Undersampling on 'enose_fruits' (838k rows -> 60k per class)
+    # Balances Fresh/Stale vs. real formalin Masked class (from 21:1 down to ~3.5:1)
+    MAX_ENOSE_PER_CLASS = 60000
+    enose_mask = (comb["dataset"] == "enose_fruits")
+    enose_sub = comb[enose_mask].groupby("label", group_keys=False).sample(
+        n=MAX_ENOSE_PER_CLASS, random_state=SEED)
+    comb = pd.concat([comb[~enose_mask], enose_sub], ignore_index=True) \
+        .sample(frac=1.0, random_state=SEED).reset_index(drop=True)
+    print("Balanced class counts after undersampling:", comb["label"].value_counts().to_dict())
     # fill still-missing whole channels from cross-dataset medians (flag 0 keeps the imputation marked)
     for canon in SENSOR_COLS:
         if comb[canon].isna().any():
