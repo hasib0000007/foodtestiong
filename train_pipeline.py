@@ -571,6 +571,20 @@ else:
     print("\nAll 8 channels are covered by the attached sensor datasets.")
     coverage_df.to_csv(f"{OUT}/sensor_dataset_coverage.csv", index=False)
 
+if len(coverage_df):
+    cov = np.array([[1 if str(coverage_df.loc[r, c]) == "YES" else 0 for c in SENSOR_COLS]
+                    for r in range(len(coverage_df))])
+    fig, ax = plt.subplots(figsize=(8, 0.6 * len(coverage_df) + 2.5))
+    ax.imshow(cov, cmap="Blues", vmin=0, vmax=1, aspect="auto")
+    ax.set_xticks(range(len(SENSOR_COLS))); ax.set_xticklabels(SENSOR_COLS, rotation=45, ha="right")
+    ax.set_yticks(range(len(coverage_df))); ax.set_yticklabels(coverage_df.dataset)
+    for r in range(len(coverage_df)):
+        for c in range(len(SENSOR_COLS)):
+            ax.text(c, r, "YES" if cov[r, c] else "-", ha="center", va="center",
+                    color="white" if cov[r, c] else "black", fontsize=8)
+    ax.set_title("Sensor channel coverage per attached dataset")
+    plt.tight_layout(); plt.savefig(f"{OUT}/sensor_channel_coverage.png", dpi=150); plt.show()
+
 def augment_environmental_channels(df, active_fraction=0.70):
     """Storage-environment channels that NO attached dataset covers would otherwise stay
     flat constants the sensor branch cannot learn from. Fill ~70% of rows with realistic
@@ -773,6 +787,22 @@ with open(f"{OUT}/evaluation_metrics.json", "w") as f:
     json.dump(eval_metrics, f, indent=2)
 print("evaluation_metrics.json saved (confusion matrices, precision/recall/F1, ROC AUCs)")
 
+fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+for ax, cr, names, title in [
+        (axes[0], img_cr, ["Stale", "Fresh"], "Image branch"),
+        (axes[1], sensor_cr, ["Stale", "Fresh", "Masked"], "Sensor branch")]:
+    x = np.arange(len(names)); w = 0.26
+    for k, (metric, label) in enumerate([("precision", "Precision"), ("recall", "Recall"),
+                                         ("f1-score", "F1-score")]):
+        vals = [float(cr[n][metric]) for n in names]
+        bars = ax.bar(x + (k - 1) * w, vals, w, label=label)
+        ax.bar_label(bars, fmt="%.3f", fontsize=7)
+    ax.set_xticks(x); ax.set_xticklabels(names)
+    ax.set_ylim(0, 1.09)
+    ax.set_title(title + " \u2014 precision / recall / F1 (validation)")
+    ax.legend(fontsize=8)
+plt.tight_layout(); plt.savefig(f"{OUT}/branch_metric_bars.png", dpi=150); plt.show()
+
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
 sensor_feature_extractor.save(f"{OUT}/sensor_feature_extractor.keras")
 print("Sensor branch saved (separate training done).")
@@ -895,6 +925,22 @@ if (pair_state == 0).any():
           f"median={np.median(d_stale_dbg):.2f} p99={np.percentile(d_stale_dbg, 99):.2f} "
           f"(above the fresh p99, as required for class separation)")
 
+plt.figure(figsize=(6.2, 4.2))
+plt.hist(d_fresh_dbg, bins=40, alpha=0.55, color="tab:green", label="Fresh")
+if (pair_state == 0).any():
+    plt.hist(d_stale_dbg, bins=40, alpha=0.55, color="tab:orange", label="Stale")
+if (pair_state == 2).any():
+    Zc_masked = (Z[pair_state == 2] - MAH_MEAN).astype(np.float64)
+    d_masked_dbg = np.sqrt(np.einsum("...i,ij,...j->...", Zc_masked,
+                                     MAH_INV_COV.astype(np.float64), Zc_masked))
+    plt.hist(d_masked_dbg, bins=40, alpha=0.55, color="tab:red", label="Masked (simulated)")
+plt.axvline(MAH_THRESHOLD, color="black", ls="--", lw=1.2,
+            label=f"threshold = {MAH_THRESHOLD:.2f}")
+plt.xlabel("Mahalanobis distance"); plt.ylabel("samples")
+plt.title("Mahalanobis distance distribution by state")
+plt.legend(fontsize=8)
+plt.tight_layout(); plt.savefig(f"{OUT}/mahalanobis_distribution.png", dpi=150); plt.show()
+
 def mahalanobis_distance(z):
     zf = np.asarray(z, np.float64)
     inv64 = MAH_INV_COV.astype(np.float64)
@@ -927,6 +973,22 @@ plt.plot(hf.history["loss"], label="train"); plt.plot(hf.history["val_loss"], la
 plt.title("Fusion engine — MAE loss"); plt.xlabel("epoch"); plt.legend()
 plt.tight_layout(); plt.savefig(f"{OUT}/fusion_training.png", dpi=150); plt.show()
 fusion_engine.save(f"{OUT}/fusion_engine.keras")
+
+idx_pred = fusion_engine.predict(Xf_va, verbose=0).ravel()
+plt.figure(figsize=(5.4, 5.4))
+for st, name, c in [(1, "Fresh", "tab:green"), (0, "Stale", "tab:orange"),
+                    (2, "Masked (simulated)", "tab:red")]:
+    m = st_va == st
+    if m.any():
+        mae_st = float(np.mean(np.abs(idx_pred[m] - gt_va[m]))) * 100.0
+        plt.scatter(gt_va[m] * 100, idx_pred[m] * 100, s=14, alpha=0.55, c=c,
+                    label=f"{name} (MAE = {mae_st:.1f})")
+plt.plot([0, 100], [0, 100], "k:", lw=1)
+plt.xlabel("Ground-truth freshness index (0-100)")
+plt.ylabel("Predicted freshness index (0-100)")
+plt.title("Fusion engine \u2014 predicted vs ground truth (validation)")
+plt.legend(fontsize=8)
+plt.tight_layout(); plt.savefig(f"{OUT}/fusion_scatter.png", dpi=150); plt.show()
 
 CH2O_ALERT_PPM = 2.0   # ZE08-CH2O reading above the ambient formaldehyde background
 
@@ -1079,6 +1141,18 @@ with open(f"{OUT}/edge_config.h", "w") as f:
     f.write(_cpp_array_2d("MAH_INV_COV", MAH_INV_COV) + "\n\n")
     f.write("#endif\n")
 print("edge_config.h generated for ESP32-S3 firmware (bounds + threshold + mean + 144x144 inv covariance)")
+
+edge_files = ["image_branch_int8.tflite", "image_branch.cc", "fusion_engine_f32.tflite",
+              "fusion_engine.cc", "edge_config.h", "image_branch.keras", "fusion_engine.keras"]
+edge_present = [f for f in edge_files if os.path.isfile(os.path.join(OUT, f))]
+edge_sizes = [os.path.getsize(os.path.join(OUT, f)) / 1024 for f in edge_present]
+plt.figure(figsize=(7.5, 4.2))
+plt.barh(edge_present[::-1], edge_sizes[::-1], color="tab:blue")
+for i, s in enumerate(edge_sizes[::-1]):
+    plt.text(s, i, f" {s:.1f} KB", va="center", fontsize=8)
+plt.xlabel("size (KB)")
+plt.title("Edge artifact sizes \u2014 ESP32-S3 flash budget")
+plt.tight_layout(); plt.savefig(f"{OUT}/artifact_sizes.png", dpi=150); plt.show()
 
 print("\nArtifacts in", OUT, ":")
 for f in sorted(glob.glob(f"{OUT}/*")):
