@@ -565,8 +565,7 @@ AV_COLS = [f"av_{c}" for c in SENSOR_COLS]
 ALL_COLS = SENSOR_COLS + AV_COLS
 print(f"\nCombined sensor dataset: {sensor_df.shape[0]} rows x {len(ALL_COLS)} features "
       f"(8 channels + 8 availability flags)")
-print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, "
-      f"masked={int((sensor_df.label==2).sum())} real formalin QC rows; sensor training uses inverse-frequency class weighting")
+print(f"Class balance: fresh={int((sensor_df.label==1).sum())}, stale={int((sensor_df.label==0).sum())}, masked={int((sensor_df.label==2).sum())}")
 print(coverage_df.to_string(index=False))   # per-dataset channel coverage table
 
 missing = [c for c, a in zip(SENSOR_COLS, AV_COLS)
