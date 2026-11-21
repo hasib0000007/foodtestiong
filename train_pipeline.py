@@ -386,6 +386,18 @@ plt.title("Image branch \u2014 ROC (validation)"); plt.legend(loc="lower right",
 plt.tight_layout(); plt.savefig(f"{OUT}/image_branch_roc.png", dpi=150); plt.show()
 print(f"[ROC] Image branch val AUC = {auc_img_branch:.4f} on {len(val_idx):,} held-out images")
 
+# v14: precision/recall/F1 and the binary confusion matrix of the image branch on the
+# validation split. Evaluation-only; the decision threshold is the model's 0.5 output.
+img_pred = (img_prob >= 0.5).astype(int)
+cm_img = confusion_matrix(labels[val_idx], img_pred, labels=[0, 1])
+ConfusionMatrixDisplay(cm_img, display_labels=["Stale", "Fresh"]).plot(cmap="Blues")
+plt.title("Image branch \u2014 Confusion Matrix")
+plt.tight_layout(); plt.savefig(f"{OUT}/image_branch_confusion_matrix.png", dpi=150); plt.show()
+img_cr = classification_report(labels[val_idx], img_pred, target_names=["Stale", "Fresh"],
+                               digits=3, zero_division=0, output_dict=True)
+print(classification_report(labels[val_idx], img_pred, target_names=["Stale", "Fresh"],
+                            digits=3, zero_division=0))
+
 image_branch.save(f"{OUT}/image_branch.keras")
 image_feature_extractor.save(f"{OUT}/image_feature_extractor.keras")
 print("Image branch saved (separate training done).")
@@ -721,6 +733,8 @@ cm = confusion_matrix(y_va, y_pred)
 ConfusionMatrixDisplay(cm, display_labels=["Stale", "Fresh", "Masked"]).plot(cmap="Blues")
 plt.title("Sensor branch — Confusion Matrix")
 plt.tight_layout(); plt.savefig(f"{OUT}/sensor_confusion_matrix.png", dpi=150); plt.show()
+sensor_cr = classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Masked"],
+                                  digits=3, zero_division=0, output_dict=True)
 print(classification_report(y_va, y_pred, target_names=["Stale", "Fresh", "Masked"], digits=3,
                             zero_division=0))
 
@@ -744,6 +758,31 @@ auc_per_class = {name: round(float(auc(*roc_curve(Y_bin[:, k], y_prob[:, k])[:2]
                  for k, name in enumerate(["Stale", "Fresh", "Masked"])}
 macro_auc = float(roc_auc_score(Y_bin, y_prob, average="macro", multi_class="ovr"))
 print(f"[ROC] Sensor branch one-vs-rest AUC (macro) = {macro_auc:.4f} on {len(y_va):,} rows | per-class: {auc_per_class}")
+
+# v14: consolidated evaluation-metrics summary for the thesis (both branches + ROC/AUC).
+# Images: one operating point (0.5 threshold); ROC covers the full threshold sweep.
+eval_metrics = {
+    "image_branch": {
+        "n_val_images": int(len(val_idx)),
+        "accuracy": float(img_cr["accuracy"]),
+        "precision": {n: img_cr[n]["precision"] for n in ("Stale", "Fresh")},
+        "recall": {n: img_cr[n]["recall"] for n in ("Stale", "Fresh")},
+        "f1_score": {n: img_cr[n]["f1-score"] for n in ("Stale", "Fresh")},
+        "confusion_matrix": cm_img.tolist(),
+        "roc_auc": auc_img_branch},
+    "sensor_branch": {
+        "n_val_rows": int(len(y_va)),
+        "accuracy": float(sensor_cr["accuracy"]),
+        "precision": {n: sensor_cr[n]["precision"] for n in ("Stale", "Fresh", "Masked")},
+        "recall": {n: sensor_cr[n]["recall"] for n in ("Stale", "Fresh", "Masked")},
+        "f1_score": {n: sensor_cr[n]["f1-score"] for n in ("Stale", "Fresh", "Masked")},
+        "confusion_matrix": cm.tolist(),
+        "roc_auc_macro_ovr": macro_auc,
+        "roc_auc_per_class": auc_per_class},
+}
+with open(f"{OUT}/evaluation_metrics.json", "w") as f:
+    json.dump(eval_metrics, f, indent=2)
+print("[EVAL] evaluation_metrics.json saved (confusion matrices, precision/recall/F1, ROC AUC)")
 
 sensor_branch.save(f"{OUT}/sensor_branch.keras")
 sensor_feature_extractor.save(f"{OUT}/sensor_feature_extractor.keras")
